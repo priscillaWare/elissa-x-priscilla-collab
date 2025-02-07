@@ -1,10 +1,24 @@
-#define MAXNAME
+#define MAXNAME 50
 #define USLOSS_MIN_STACK
-#define MAXPROC
+#define MAXPROC 50
 
 struct process {
-    int x;  //placeholder
-    int y;  //placeholder
+    int pid;
+    int priority;
+    int status;
     struct process* children;
     struct process* next;
-}
+} Process;
+
+void phase1_init();
+void wrapper();
+void spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int priority);
+int join(int *status);
+void quit(int status);
+void zap(int pid);
+int getpid();
+void dumpProcesses();
+void blockMe();
+int unblockProc(int pid);
+
+
