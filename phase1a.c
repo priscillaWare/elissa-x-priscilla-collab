@@ -6,27 +6,32 @@ void phase1_init(){
     // initialize data structures including process table entry
 }
 
-void spork(){
+void wrapper(){
+    // wrapper for a function... gets info about a process
+}
+
+void spork(char *name, int (*startFunc)(void*), void *arg, int stackSize,
+int priority){
     // creates a new process, which is a child of the current process
 }
 
-void join(){
+void join(int *status){
     // blocks the current process until one of its children has terminated; 
     // it then delivers the “status” of the child (the parameter 
     // that the child passed to quit()) back to the parent
 }
 
-void quit(){
+void quit(int status){
     // NEVER RETURNS. terminates the current process with a 'status' value
     // If the parent of the proccess is already waiting in a join(), the
     // parent will be awoken. 
 }
 
-void zap(){
+void zap(int pid){
     // SKIP
 }
 
-void getpid(){
+int getpid(){
     // returns the PID of the current executing process
 }
 
