@@ -2,7 +2,7 @@
 #define USLOSS_MIN_STACK
 #define MAXPROC 50
 
-struct process {
+typedef struct process {
     int pid;
     int priority;
     int status;
