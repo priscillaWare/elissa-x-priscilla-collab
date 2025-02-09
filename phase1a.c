@@ -1,21 +1,38 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "phase1.h"
+#include "usloss.h"
 
 static Process process_table[MAXPROC];
+
+extern int testcase_main(void *arg);
 
 void phase1_init(){
     // called once
     // initialize data structures including process table entry
+    int psr = USLOSS_PsrGet();
+    USLOSS_PsrSet(psr & ~USLOSS_PSR_CURRENT_INT);
+
     for (int i = 0; i < MAXPROC; i++) {
         process_table[i].pid = -1
     }
     process_table[0].pid = 1
     process_table[0].priority = 6;
+    strncpy(processTable[0].name, "init", MAXNAME);
+    process_table[0].status = 0
+    
+    //start testcase main
+    int testcase_pid = spork("testcase_main", testcase_main, NULL, USLOSS_MIN_STACK, 3);
+    USLOSS_ContextSwitch(USLOSS_Context *old, USLOSS_Context *new)
+    Process *testcaseProcess = &process_table[testcase_pid % MAXPROC];
+    Process *initProcess = &process_table[0];
 
-    //start testcase main?
-    char testcase_main = "testcase main";
-
+    if (testcase_pid != 0) {
+        printf("PHASE1_INIT: Failed to start testcase_main.\n");
+    }
+    USLOSS_Halt(0);
+    
+    //bootstrapping
     while(1) {
         int status;
         int pid = join(&status);
@@ -25,6 +42,7 @@ void phase1_init(){
             USLOSS_Halt(0);
         }
     }
+    USLOSS_PsrSet(psr);
 }
 
 void wrapper(){
