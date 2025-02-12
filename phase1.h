@@ -8,6 +8,7 @@ typedef struct process {
     int status;
     struct process* children;
     struct process* next;
+    USLOSS_Context* context; // i think every process should have its own context to be able to switch ??
 } Process;
 
 void phase1_init();
@@ -20,5 +21,4 @@ int getpid();
 void dumpProcesses();
 void blockMe();
 int unblockProc(int pid);
-
 
