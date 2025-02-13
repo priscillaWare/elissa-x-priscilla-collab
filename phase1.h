@@ -8,7 +8,7 @@ typedef struct process {
     int status;
     struct process* children;
     struct process* next;
-    USLOSS_Context* context; // i think every process should have its own context to be able to switch ??
+    USLOSS_Context* context; 
 } Process;
 
 void phase1_init();

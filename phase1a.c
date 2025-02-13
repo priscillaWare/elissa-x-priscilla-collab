@@ -136,13 +136,31 @@ void zap(int pid){
 }
 
 int getpid(){
-    // returns the PID of the current executing process
-    return 0;
+    return USLOSS_PsrGet();
 }
 
 void dumpProcesses(){
-    // prints human-readable debug data about the process table
-    printf("Nice Things\n");
+    printf("\n---- Process Table ----\n");
+    printf("PID  | Parent | Priority | Status      | Children\n");
+    printf("-----------------------------------------------\n");
+
+    for (int i = 0; i < MAXPROC; i++) {
+        if (process_table[i].pid != -1) { // Only print active processes
+            printf("%-4d | %-6d | %-8d | %-2d | ",
+                   process_table[i].pid,
+                   process_table[i].parent_pid,
+                   process_table[i].priority,
+                   process_table[i].status
+            // Print child PIDs
+            Process *child = process_table[i].children;
+            while (child) {
+                printf("%d ", child->pid);
+                child = child->next_sibling;
+            }
+            printf("\n");
+        }
+    }
+    printf("---------------------------\n\n");
 }
 
 void blockMe(){
