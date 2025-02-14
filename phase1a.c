@@ -7,6 +7,7 @@
 static Process process_table[MAXPROC];
 Process *running_process = NULL;
 int next_pid = 0;
+static int terminationCounter = 0;
 
 extern int testcase_main(void *arg);
 
@@ -87,13 +88,14 @@ void phase1_init(void) {
 }
 
 
-
 void quit_phase_1a(int status, int switchToPid) {
 
     // Mark the running process as terminated and save its exit status.
     running_process->status = -1;
     running_process->exit_status = status;
-    
+    // Record the termination order.
+    running_process->termOrder = terminationCounter++;
+
     // Find the process to switch to by its PID.
     Process *new_process = NULL;
     for (int i = 0; i < MAXPROC; i++) {
@@ -113,10 +115,11 @@ void quit_phase_1a(int status, int switchToPid) {
 
     USLOSS_ContextSwitch(&old_process->context, &new_process->context);
 
-    // This point should never be reached; if it is, print debug info.
+    // Should never return.
     USLOSS_Console("ERROR: Context switch returned unexpectedly in quit_phase_1a! (old PID %d, new PID %d)\n", old_process->pid, new_process->pid);
     USLOSS_Halt(1);
 }
+
 
 void processWrapper(void) {
     if (running_process == NULL || running_process->startFunc == NULL) {
@@ -179,26 +182,52 @@ int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int pri
     return pid;
 }
 
+
 int join(int *status) {
     if (status == NULL) {
         USLOSS_Console("ERROR: join() called with NULL status pointer.\n");
         return -3; // Invalid status pointer.
     }
-    // Iterate over the process table to find a terminated child.
-    for (int i = 0; i < MAXPROC; i++) {
-        if (process_table[i].pid != -1 &&
-            process_table[i].parent == running_process &&
-            process_table[i].status == -1) {
-            *status = process_table[i].exit_status;
-            int childPid = process_table[i].pid;
-            // Clean up the terminated child's entry.
-            process_table[i].pid = -1;
-            process_table[i].status = 0;
-            return childPid;
+
+    Process *parent = running_process;
+    Process *child = parent->children;
+    Process *target = NULL;
+    int highestOrder = -1;  // Initialize to -1 so that any nonnegative termOrder will be higher.
+
+    while (child != NULL) {
+        if (child->status == -1) {
+            // Choose the terminated child with the highest termOrder.
+            if (child->termOrder > highestOrder) {
+                highestOrder = child->termOrder;
+                target = child;
+            }
         }
+        child = child->next;
+    }
+
+    if (target != NULL) {
+        *status = target->exit_status;
+        int childPid = target->pid;
+        // Remove target from the parent's children list.
+        if (parent->children == target) {
+            parent->children = target->next;
+        } else {
+            Process *prev = parent->children;
+            while (prev != NULL && prev->next != target)
+                prev = prev->next;
+            if (prev != NULL)
+                prev->next = target->next;
+        }
+        // Mark the target as cleaned up.
+        target->pid = -1;
+        target->status = 0;
+        return childPid;
     }
     return -2;  // No terminated children found.
 }
+
+
+
 
 void TEMP_switchTo(int newpid) {
     Process *new_process = NULL;

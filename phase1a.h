@@ -20,6 +20,8 @@ typedef struct process {
     int (*startFunc)(void *);  
     void *arg;  
     int exit_status;
+    int termOrder;  
+
 } Process;
 
 extern int testcase_main(void *arg);

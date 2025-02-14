@@ -19,6 +19,7 @@ int testcase_main()
     pid1 = spork("XXp1", XXp1, "XXp1", USLOSS_MIN_STACK, 2);
     USLOSS_Console("Phase 1A TEMPORARY HACK: Manually switching to the recently created XXp1()\n");
     TEMP_switchTo(pid1);
+    
     USLOSS_Console("testcase_main(): after spork of child %d\n", pid1);
     
     USLOSS_Console("testcase_main(): performing join\n");
