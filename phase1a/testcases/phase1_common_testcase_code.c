@@ -24,6 +24,7 @@ void startup(int argc, char **argv)
     phase1_init();
 
     USLOSS_Console("Phase 1A TEMPORARY HACK: init() manually switching to PID 1.\n");
+
     TEMP_switchTo(1);
 }
 

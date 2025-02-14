@@ -20,16 +20,16 @@ int testcase_main()
     USLOSS_Console("Phase 1A TEMPORARY HACK: Manually switching to the recently created XXp1()\n");
     TEMP_switchTo(pid1);
     USLOSS_Console("testcase_main(): after spork of child %d\n", pid1);
-
+    
     USLOSS_Console("testcase_main(): performing join\n");
     kidpid = join(&status);
+    
     if (status != 3)
     {
         USLOSS_Console("ERROR: kidpid %d status %d\n", kidpid,status);
         USLOSS_Halt(1);
     }
     USLOSS_Console("testcase_main(): exit status for child %d is %d\n", kidpid, status); 
-
     return 0;
 }
 

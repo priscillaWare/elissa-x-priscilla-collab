@@ -5,71 +5,95 @@
 #include "usloss.h"
 
 static Process process_table[MAXPROC];
-
 Process *running_process = NULL;
-int next_pid = 1;
+int next_pid = 0;
 
 extern int testcase_main(void *arg);
 
-void phase1_init() {
-    int psr = USLOSS_PsrGet();
-    int result = USLOSS_PsrSet(psr & ~USLOSS_PSR_CURRENT_INT);
-    if (result != USLOSS_ERR_OK) {
-        USLOSS_Console("Error: USLOSS_PsrSet failed in phase1_init()\n");
-        USLOSS_Halt(1);
-    }
-
-    // Initialize the process table.
-    for (int i = 0; i < MAXPROC; i++) {
-        process_table[i].pid = -1;
-        process_table[i].status = 0;
-        process_table[i].children = NULL;
-        process_table[i].next = NULL;
-        process_table[i].exit_status = 0;
-    }
+int init_run(void *arg) {
+    extern void phase2_start_service_processes(void);
+    extern void phase3_start_service_processes(void);
+    extern void phase4_start_service_processes(void);
+    extern void phase5_start_service_processes(void);
     
-    // Create the special init process with PID 1, priority 6.
-    process_table[1].pid = 1;
-    process_table[1].priority = 6;
-    strncpy(process_table[1].name, "init", MAXNAME);
-    process_table[1].status = 0;
-    running_process = &process_table[1];
-    next_pid++;
-
-    // Spork testcase_main (this creates a child process).
+    // Call the service process functions so their messages are printed.
+    phase2_start_service_processes();
+    phase3_start_service_processes();
+    phase4_start_service_processes();
+    phase5_start_service_processes();
+    
     int testcase_pid = spork("testcase_main", testcase_main, NULL, USLOSS_MIN_STACK, 3);
     if (testcase_pid < 0) {
-        USLOSS_Console("PHASE1_INIT: Failed to start testcase_main.\n");
+        USLOSS_Console("ERROR: Failed to start testcase_main.\n");
         USLOSS_Halt(1);
     }
+
+    USLOSS_Console("Phase 1A TEMPORARY HACK: init() manually switching to testcase_main() after using spork() to create it.\n");
+
     TEMP_switchTo(testcase_pid);
     // After bootstrap is complete, init enters a loop to call join repeatedly.
     while (1) {
         int status;
         int childPid = join(&status);
         if (childPid == -2) { // No children have terminated.
+            USLOSS_Console("Phase 1A TEMPORARY HACK: testcase_main() returned, simulation will now halt.\n");
             USLOSS_Halt(0);
         }
-    
+
     }
-    USLOSS_PsrSet(psr);
+    USLOSS_Halt(0);  // Ensure we never return!
+    return 0;
+}
+
+/*
+ * phase1_init: Called by the startup code to initialize the kernel.
+ * It sets up the process table and creates the special init process.
+ */
+void phase1_init(void) {
+    int i;
+
+    /* Initialize the process table */
+    for (i = 0; i < MAXPROC; i++) {
+        process_table[i].pid = -1;
+        process_table[i].status = 0;
+        process_table[i].children = NULL;
+        process_table[i].next = NULL;
+        process_table[i].parent = NULL;
+        process_table[i].exit_status = 0;
+        process_table[i].stack = NULL;
+    }
+
+    /* Create the special init process with PID 1 */
+    process_table[1].pid = 1;
+    process_table[1].priority = 6;
+    strncpy(process_table[1].name, "init", MAXNAME);
+    process_table[1].status = 0;  /* 0 means runnable */
+    process_table[1].parent = NULL;
+    process_table[1].startFunc = init_run;
+
+    // Allocate stack and initialize context for init process (PID 1)
+    char *init_stack = malloc(USLOSS_MIN_STACK);
+    if (init_stack == NULL) {
+        USLOSS_Console("ERROR: malloc failed for init process\n");
+        USLOSS_Halt(1);
+    }
+    process_table[1].stack = init_stack;
+
+    // Ensure processWrapper() is called so init_run() actually executes!
+    USLOSS_ContextInit(&process_table[1].context, init_stack, USLOSS_MIN_STACK, NULL, processWrapper);
+
+    // running_process = &process_table[1];
+    next_pid+=2;  /* Next process will get PID 2 */
 }
 
 
 
 void quit_phase_1a(int status, int switchToPid) {
-    if (running_process == NULL) {
-        USLOSS_Console("ERROR: quit_phase_1a() called with no running process!\n");
-        USLOSS_Halt(1);
-    }
-
-    USLOSS_Console("quit_phase_1a(): Process %d quitting, switching to %d\n",
-                   running_process->pid, switchToPid);
 
     // Mark the running process as terminated and save its exit status.
     running_process->status = -1;
     running_process->exit_status = status;
-
+    
     // Find the process to switch to by its PID.
     Process *new_process = NULL;
     for (int i = 0; i < MAXPROC; i++) {
@@ -78,41 +102,34 @@ void quit_phase_1a(int status, int switchToPid) {
             break;
         }
     }
-
     if (new_process == NULL || new_process->pid == -1) {
         USLOSS_Console("ERROR: quit_phase_1a() failed, switchToPid %d not found\n", switchToPid);
         USLOSS_Halt(1);
     }
-
+    
     // Update running_process to point to the new process before switching.
     Process *old_process = running_process;
     running_process = new_process;
 
     USLOSS_ContextSwitch(&old_process->context, &new_process->context);
+
+    // This point should never be reached; if it is, print debug info.
+    USLOSS_Console("ERROR: Context switch returned unexpectedly in quit_phase_1a! (old PID %d, new PID %d)\n", old_process->pid, new_process->pid);
+    USLOSS_Halt(1);
 }
 
-
-
-void processWrapper() {
+void processWrapper(void) {
     if (running_process == NULL || running_process->startFunc == NULL) {
         USLOSS_Console("ERROR: processWrapper() called with NULL function!\n");
         USLOSS_Halt(1);
     }
+    
+    // Pass the argument stored in running_process instead of NULL.
     int rc = running_process->startFunc(running_process->arg);
     
-    // If the process is the testcase_main process, halt the simulation.
-    if (strcmp(running_process->name, "testcase_main") == 0) {
-        //USLOSS_Console("Phase 1A TEMPORARY HACK: testcase_main() returned, simulation will now halt.\n");
-        USLOSS_Halt(rc);
-    } else {
-        // Otherwise, switch to the parent process.
-        if (running_process->parent != NULL)
-            quit_phase_1a(rc, running_process->parent->pid);
-        else {
-            USLOSS_Console("ERROR: process with no parent is trying to quit.\n");
-            USLOSS_Halt(1);
-        }
-    }
+    quit_phase_1a(rc, (running_process->parent ? running_process->parent->pid : 0));
+    
+    while (1) { }  // Should never return
 }
 
 int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int priority) {
@@ -156,7 +173,7 @@ int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int pri
         Process *temp = parent->children;
         while (temp->next != NULL) {
             temp = temp->next;
-        }
+        }         
         temp->next = &process_table[slot];
     }
     return pid;
@@ -164,6 +181,7 @@ int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int pri
 
 int join(int *status) {
     if (status == NULL) {
+        USLOSS_Console("ERROR: join() called with NULL status pointer.\n");
         return -3; // Invalid status pointer.
     }
     // Iterate over the process table to find a terminated child.
@@ -182,37 +200,46 @@ int join(int *status) {
     return -2;  // No terminated children found.
 }
 
-
-
 void TEMP_switchTo(int newpid) {
-    USLOSS_Console("TEMP_switchTo(): Attempting switch to PID %d\n", newpid);
+    Process *new_process = NULL;
 
+    // Check if we're bootstrapping (no current running process).
     if (running_process == NULL) {
-        USLOSS_Console("ERROR: No running process!\n");
-        USLOSS_Halt(1);
+        for (int i = 0; i < MAXPROC; i++) {
+            if (process_table[i].pid == newpid) {
+                new_process = &process_table[i];
+                break;
+            }
+        }
+        if (new_process == NULL || new_process->pid == -1) {
+            USLOSS_Halt(1);
+        }
+        running_process = new_process;
+        // Instead of context switching from a non-existent process,
+        // directly start the process by calling processWrapper.
+        processWrapper();
+        USLOSS_Halt(0);
     }
 
-    Process *new_process = NULL;
     for (int i = 0; i < MAXPROC; i++) {
         if (process_table[i].pid == newpid) {
             new_process = &process_table[i];
             break;
         }
     }
-
     if (new_process == NULL || new_process->pid == -1) {
         USLOSS_Console("ERROR: TEMP_switchTo(%d) failed, process not found\n", newpid);
         USLOSS_Halt(1);
     }
 
-    USLOSS_Console("TEMP_switchTo(): Switching from PID %d to PID %d\n", running_process->pid, new_process->pid);
-
-    USLOSS_Context *old_context = &running_process->context;
-    USLOSS_Context *new_context = &new_process->context;
-
+    Process *old_process = running_process;
     running_process = new_process;
-    USLOSS_ContextSwitch(old_context, new_context);
+    USLOSS_ContextSwitch(&old_process->context, &new_process->context);
+
 }
+
+
+
 
 void dumpProcesses() {
     USLOSS_Console("-**************** Calling dumpProcesses() *******************\n");
@@ -236,7 +263,6 @@ void dumpProcesses() {
         }
     }
 }
-
 
 int getpid() {
     return running_process ? running_process->pid : -1;
