@@ -4,6 +4,11 @@
 #include "phase1a.h"
 #include "usloss.h"
 
+// Phase1a
+// Authors: Elissa Matlock, Priscilla Ware
+// Description: This program implements the first part of functionality for a kernel
+
+
 static Process process_table[MAXPROC];
 Process *running_process = NULL;
 int next_pid = 0;
@@ -11,6 +16,9 @@ static int terminationCounter = 0;
 
 extern int testcase_main(void *arg);
 
+// init_run(void) - this function is the main() to the init process. It calls
+// the service processes, creates the testcase main process, and enters its loop
+// where it join()s until there are no more children.
 int init_run(void *arg) {
     extern void phase2_start_service_processes(void);
     extern void phase3_start_service_processes(void);
@@ -22,7 +30,8 @@ int init_run(void *arg) {
     phase3_start_service_processes();
     phase4_start_service_processes();
     phase5_start_service_processes();
-    
+
+    // make testcase_main process
     int testcase_pid = spork("testcase_main", testcase_main, NULL, USLOSS_MIN_STACK, 3);
     if (testcase_pid < 0) {
         USLOSS_Console("ERROR: Failed to start testcase_main.\n");
@@ -88,6 +97,8 @@ void phase1_init(void) {
 }
 
 
+// quit_phase_1a(int status, int switchToPid) - this function terminates the running process
+// and performs a context switch into the process indicated by switchToPid.
 void quit_phase_1a(int status, int switchToPid) {
 
     // Mark the running process as terminated and save its exit status.
@@ -120,7 +131,8 @@ void quit_phase_1a(int status, int switchToPid) {
     USLOSS_Halt(1);
 }
 
-
+// processWrapper() executes the function of a process and terminates it when
+// it is no longer running
 void processWrapper(void) {
     if (running_process == NULL || running_process->startFunc == NULL) {
         USLOSS_Console("ERROR: processWrapper() called with NULL function!\n");
@@ -135,6 +147,8 @@ void processWrapper(void) {
     while (1) { }  // Should never return
 }
 
+// spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int priority) - creates
+// a child of the currently runing process. returns the process id of the child.
 int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int priority) {
     // Save the parent pointer immediately.
     Process *parent = running_process;
@@ -182,7 +196,9 @@ int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int pri
     return pid;
 }
 
-
+// join(int *status) - kills the child of the currently running process and
+// frees a slot on the process table. returns the process id of the child if found.
+// If there are no more children, the function returns -2
 int join(int *status) {
     if (status == NULL) {
         USLOSS_Console("ERROR: join() called with NULL status pointer.\n");
@@ -226,9 +242,8 @@ int join(int *status) {
     return -2;  // No terminated children found.
 }
 
-
-
-
+// TEMP_switchTo(int newpid) - performs a context switch to the process indicated
+// by newpid.
 void TEMP_switchTo(int newpid) {
     Process *new_process = NULL;
 
@@ -267,9 +282,7 @@ void TEMP_switchTo(int newpid) {
 
 }
 
-
-
-
+// dumpProcesses() - displays information about the process table in a readable format
 void dumpProcesses() {
     USLOSS_Console("-**************** Calling dumpProcesses() *******************\n");
     USLOSS_Console("- PID  PPID  NAME              PRIORITY  STATE\n");
