@@ -1,5 +1,5 @@
-#ifndef PHASE1_H
-#define PHASE1_H
+#ifndef PHASE1A_H
+#define PHASE1A_H
 
 #define MAXNAME 50
 #define MAXPROC 50
@@ -14,25 +14,28 @@ typedef struct process {
     char name[MAXNAME];
     struct process* children;
     struct process* next;
+    struct process *parent; 
     USLOSS_Context context;
     char *stack;  
     int (*startFunc)(void *);  
     void *arg;  
     int exit_status;
+    int termOrder;  
+
 } Process;
 
 extern int testcase_main(void *arg);
-void phase1_init();
+void phase1_init(void);
 void quit_phase_1a(int status, int switchToPid);
-void wrapper();
+void processWrapper(void);
 int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int priority);
 void quit(int switchToPid);
 int join(int *status);
 void zap(int pid);
-int getpid();
+int getpid(void);
 void TEMP_switchTo(int newpid);
-void dumpProcesses();
-void blockMe();
+void dumpProcesses(void);
+void blockMe(void);
 int unblockProc(int pid);
 
 #endif
