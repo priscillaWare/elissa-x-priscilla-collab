@@ -17,7 +17,6 @@
 #include "phase1a.h"
 #include "usloss.h"
 
-// Fixed-size process table. Each process is stored in one slot.
 static Process process_table[MAXPROC];
 // Pointer to the currently running process.
 Process *running_process = NULL;
@@ -28,8 +27,10 @@ static int terminationCounter = 0;
 
 extern int testcase_main(void *arg);
 
-// init_run: the starting function for the special init process.
-// It sets up interrupts, starts the service processes, creates testcase_main, and then switches to it.
+// init_run(void) - this function is the main() to the init process. It calls
+// the service processes, creates the testcase main process, and enters its loop
+// where it join()s until there are no more children.
+
 int init_run(void *arg) {
     // Enable interrupts by setting the USLOSS_PSR_CURRENT_INT bit.
     int current = USLOSS_PsrGet();
@@ -46,6 +47,7 @@ int init_run(void *arg) {
     phase3_start_service_processes();
     phase4_start_service_processes();
     phase5_start_service_processes();
+
     
     // Create the testcase_main process.
     int testcase_pid = spork("testcase_main", testcase_main, NULL, USLOSS_MIN_STACK, 3);
@@ -181,7 +183,6 @@ void processWrapper(void) {
     while (1) { }  // Should never reach here.
 }
 
-
 // spork: Creates a new process with the given parameters.
 // It checks for kernel mode, validates stack size and priority, finds a free slot
 // using modulo arithmetic, initializes the process table entry, allocates a stack,
@@ -253,12 +254,10 @@ int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int pri
     return pid;
 }
 
-
-// join: Waits for a terminated child process.
-// It searches the parent's children list for a terminated child (status == -1)
-// and chooses the one with the highest termOrder (the most recently terminated).
-// It then removes that child from the list, frees its slot (by setting pid to -1),
-// and returns its PID. If no terminated child is found, returns -2.
+// join(int *status) - kills the child of the currently running process and
+// frees a slot on the process table. returns the process id of the child if found.
+// If there are no more children, the function returns -2
+>>>>>>> 72e351ba55cbb91bb5189a5a5fd76ddf13f0c9c4
 int join(int *status) {
     if (status == NULL) {
         USLOSS_Console("ERROR: join() called with NULL status pointer.\n");
@@ -303,9 +302,9 @@ int join(int *status) {
     return -2;  // No terminated child found.
 }
 
-
-// TEMP_switchTo: Temporarily switches execution to the process with the given PID.
-// If no running process is present (during bootstrapping), it calls processWrapper() directly.
+// TEMP_switchTo(int newpid) - performs a context switch to the process indicated
+// by newpid.
+>>>>>>> 72e351ba55cbb91bb5189a5a5fd76ddf13f0c9c4
 void TEMP_switchTo(int newpid) {
     Process *new_process = NULL;
 
@@ -345,11 +344,11 @@ void TEMP_switchTo(int newpid) {
     USLOSS_ContextSwitch(&old_process->context, &new_process->context);
 }
 
+// dumpProcesses() - displays information about the process table in a readable format
+void dumpProcesses() {
+    USLOSS_Console("-**************** Calling dumpProcesses() *******************\n");
+    USLOSS_Console("- PID  PPID  NAME              PRIORITY  STATE\n");
 
-// dumpProcesses: Prints out the contents of the process table.
-// Each slot is printed in order (0 to MAXPROC-1), showing PID, PPID, process name, priority, and state.
-void dumpProcesses(void) {
-    USLOSS_Console(" PID  PPID  NAME              PRIORITY  STATE\n");
     for (int i = 0; i < MAXPROC; i++) {
         if (process_table[i].pid != -1) {
             int pid = process_table[i].pid;
@@ -392,3 +391,5 @@ int unblockProc(int pid) {
 void zap(int pid) {
     // Function not implemented in Phase 1A.
 }
+
+
