@@ -66,9 +66,6 @@ void zap(int pid);
 // getpid: Returns the PID of the currently running process.
 int getpid(void);
 
-// TEMP_switchTo: Temporarily switches context to the process with the given PID.
-void TEMP_switchTo(int newpid);
-
 // dumpProcesses: Prints the current process table information (for debugging).
 void dumpProcesses(void);
 
@@ -77,5 +74,9 @@ void blockMe(void);
 
 // unblockProc: Unblocks the process with the given PID (placeholder for later phases).
 int unblockProc(int pid);
+
+void dispatcher(void);
+
+void contextSwitch(Process *next);
 
 #endif

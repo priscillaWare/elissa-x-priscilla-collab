@@ -17,7 +17,9 @@ void startup(int argc, char **argv)
     USLOSS_IntVec[USLOSS_CLOCK_INT] = trivial_clock_handler;
 
     phase1_init();
+    USLOSS_Console("HELLLOOOO\n");
     dispatcher();
+    USLOSS_Console("HELLLOOOO\n");
 }
 
 

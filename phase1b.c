@@ -1,25 +1,33 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include "phase1a.h"
-#include "usloss.h"
+/*
+ * File: phase1b.c
+ * Purpose: Implements the core process management routines for Phase 1B of USLOSS.
+ *          Adds process blocking, zapping, and a dispatcher with priority scheduling.
+ * Authors: Elissa Matlock and Priscilla Ware
+ */
 
-// Phase1a
-// Authors: Elissa Matlock, Priscilla Ware
-// Description: This program implements the first part of functionality for a kernel
-
-
-static Process process_table[MAXPROC];
-Process *running_process = NULL;
-int next_pid = 0;
-static int terminationCounter = 0;
-
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include "phase1b.h"
+ #include "usloss.h"
+ 
+ static Process process_table[MAXPROC];
+ Process *running_process = NULL;
+ static int next_pid = 0;
+ 
+ // Queues for scheduling
+ static Process *ready_queues[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
+ 
 extern int testcase_main(void *arg);
-
-// init_run(void) - this function is the main() to the init process. It calls
-// the service processes, creates the testcase main process, and enters its loop
-// where it join()s until there are no more children.
+ 
 int init_run(void *arg) {
+
+    int current = USLOSS_PsrGet();
+    int result = USLOSS_PsrSet(current | USLOSS_PSR_CURRENT_INT);
+    if (result != USLOSS_DEV_OK) {
+        USLOSS_Halt(1);
+    }
+
     extern void phase2_start_service_processes(void);
     extern void phase3_start_service_processes(void);
     extern void phase4_start_service_processes(void);
@@ -31,39 +39,34 @@ int init_run(void *arg) {
     phase4_start_service_processes();
     phase5_start_service_processes();
 
-    // make testcase_main process
     int testcase_pid = spork("testcase_main", testcase_main, NULL, USLOSS_MIN_STACK, 3);
     if (testcase_pid < 0) {
-        USLOSS_Console("ERROR: Failed to start testcase_main.\n");
         USLOSS_Halt(1);
     }
 
-    USLOSS_Console("Phase 1A TEMPORARY HACK: init() manually switching to testcase_main() after using spork() to create it.\n");
 
-    TEMP_switchTo(testcase_pid);
-    // After bootstrap is complete, init enters a loop to call join repeatedly.
+    dispatcher();  // Ensures the first process actually starts
+
     while (1) {
         int status;
         int childPid = join(&status);
-        if (childPid == -2) { // No children have terminated.
-            USLOSS_Console("Phase 1A TEMPORARY HACK: testcase_main() returned, simulation will now halt.\n");
+        if (childPid == -2) {
+            USLOSS_Console("init_run(): No more children. Halting system.\n");
             USLOSS_Halt(0);
         }
-
     }
-    USLOSS_Halt(0);  // Ensure we never return!
     return 0;
 }
 
+
+
 /*
  * phase1_init: Called by the startup code to initialize the kernel.
- * It sets up the process table and creates the special init process.
+ * Sets up the process table and creates the special init process.
  */
 void phase1_init(void) {
-    int i;
 
-    /* Initialize the process table */
-    for (i = 0; i < MAXPROC; i++) {
+    for (int i = 0; i < MAXPROC; i++) {
         process_table[i].pid = -1;
         process_table[i].status = 0;
         process_table[i].children = NULL;
@@ -73,132 +76,99 @@ void phase1_init(void) {
         process_table[i].stack = NULL;
     }
 
-    /* Create the special init process with PID 1 */
-    process_table[1].pid = 1;
-    process_table[1].priority = 6;
-    strncpy(process_table[1].name, "init", MAXNAME);
-    process_table[1].status = 0;  /* 0 means runnable */
-    process_table[1].parent = NULL;
-    process_table[1].startFunc = init_run;
 
-    // Allocate stack and initialize context for init process (PID 1)
+    Process *init_proc = &process_table[1];
+    init_proc->pid = 1;
+    init_proc->priority = 6;
+    strncpy(init_proc->name, "init", MAXNAME);
+    init_proc->status = 0;  // Runnable
+    init_proc->parent = NULL;
+    init_proc->startFunc = init_run;
+
     char *init_stack = malloc(USLOSS_MIN_STACK);
     if (init_stack == NULL) {
         USLOSS_Console("ERROR: malloc failed for init process\n");
         USLOSS_Halt(1);
     }
-    process_table[1].stack = init_stack;
-
-    // Ensure processWrapper() is called so init_run() actually executes!
-    USLOSS_ContextInit(&process_table[1].context, init_stack, USLOSS_MIN_STACK, NULL, processWrapper);
-
-    // running_process = &process_table[1];
-    next_pid+=2;  /* Next process will get PID 2 */
+    init_proc->stack = init_stack;
+    
+    USLOSS_ContextInit(&init_proc->context, init_stack, USLOSS_MIN_STACK, NULL, processWrapper);
+    ready_queues[5] = init_proc;  // Priority 6 goes to ready_queues[5]
+    next_pid += 2;
 }
 
 
-// quit_phase_1a(int status, int switchToPid) - this function terminates the running process
-// and performs a context switch into the process indicated by switchToPid.
-void quit_phase_1a(int status, int switchToPid) {
 
-    // Mark the running process as terminated and save its exit status.
-    running_process->status = -1;
-    running_process->exit_status = status;
-    // Record the termination order.
-    running_process->termOrder = terminationCounter++;
-
-    // Find the process to switch to by its PID.
-    Process *new_process = NULL;
-    for (int i = 0; i < MAXPROC; i++) {
-        if (process_table[i].pid == switchToPid) {
-            new_process = &process_table[i];
-            break;
-        }
-    }
-    if (new_process == NULL || new_process->pid == -1) {
-        USLOSS_Console("ERROR: quit_phase_1a() failed, switchToPid %d not found\n", switchToPid);
-        USLOSS_Halt(1);
-    }
-    
-    // Update running_process to point to the new process before switching.
-    Process *old_process = running_process;
-    running_process = new_process;
-
-    USLOSS_ContextSwitch(&old_process->context, &new_process->context);
-
-    // Should never return.
-    USLOSS_Console("ERROR: Context switch returned unexpectedly in quit_phase_1a! (old PID %d, new PID %d)\n", old_process->pid, new_process->pid);
-    USLOSS_Halt(1);
-}
-
-// processWrapper() executes the function of a process and terminates it when
-// it is no longer running
-void processWrapper(void) {
-    if (running_process == NULL || running_process->startFunc == NULL) {
-        USLOSS_Console("ERROR: processWrapper() called with NULL function!\n");
-        USLOSS_Halt(1);
-    }
-    
-    // Pass the argument stored in running_process instead of NULL.
-    int rc = running_process->startFunc(running_process->arg);
-    
-    quit_phase_1a(rc, (running_process->parent ? running_process->parent->pid : 0));
-    
-    while (1) { }  // Should never return
-}
-
-// spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int priority) - creates
-// a child of the currently runing process. returns the process id of the child.
 int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int priority) {
-    // Save the parent pointer immediately.
-    Process *parent = running_process;
+    USLOSS_Console("spork(): Attempting to create process %s\n", name);
 
-    int pid = next_pid++;
-    int slot = next_pid % MAXPROC;
-    if (process_table[slot].pid != -1) {
-        USLOSS_Console("ERROR: No available slots in process table for %s\n", name);
+    if (priority < 1 || priority > 5) {
+        USLOSS_Console("spork(): ERROR - Invalid priority %d\n", priority);
+        return -1;
+    }
+    if (stackSize < USLOSS_MIN_STACK) {
+        USLOSS_Console("spork(): ERROR - Stack size too small\n");
+        return -2;
+    }
+
+    USLOSS_Console("spork(): next_pid before assignment = %d\n", next_pid);
+
+    int slot;
+    for (slot = 0; slot < MAXPROC; slot++) {
+        if (process_table[slot].pid == -1) break;
+    }
+    if (slot == MAXPROC) {
+        USLOSS_Console("spork(): ERROR - No free process slots\n");
         return -1;
     }
 
-
-    process_table[slot].pid = pid;
-    process_table[slot].priority = priority;
-    strncpy(process_table[slot].name, name, MAXNAME);
-    process_table[slot].status = 0;
-    process_table[slot].children = NULL;
-    process_table[slot].next = NULL;
-
-    // Set the child's parent pointer.
-    process_table[slot].parent = parent;
-
-    char *stack = malloc(USLOSS_MIN_STACK);
-    if (stack == NULL) {
-        USLOSS_Console("ERROR: malloc failed for %s\n", name);
+    Process *new_proc = &process_table[slot];
+    new_proc->pid = next_pid++;  // 🚨 Increment PID
+    new_proc->priority = priority;
+    strncpy(new_proc->name, name, MAXNAME);
+    new_proc->status = 0;  // Mark as runnable
+    new_proc->stack = malloc(stackSize);
+    if (!new_proc->stack) {
+        USLOSS_Console("spork(): ERROR - Stack allocation failed\n");
         USLOSS_Halt(1);
     }
-    process_table[slot].stack = stack;
+    new_proc->startFunc = startFunc;
+    new_proc->arg = arg;
 
-    process_table[slot].startFunc = startFunc;
-    process_table[slot].arg = arg;
+    USLOSS_ContextInit(&new_proc->context, new_proc->stack, stackSize, NULL, processWrapper);
 
-    USLOSS_ContextInit(&process_table[slot].context, stack, USLOSS_MIN_STACK, NULL, processWrapper);
+    USLOSS_Console("spork(): Created process %s with PID %d (next_pid now %d)\n", name, new_proc->pid, next_pid);
 
-    // Link the child into the parent's children list.
-    if (parent->children == NULL) {
-        parent->children = &process_table[slot];
-    } else {
-        Process *temp = parent->children;
-        while (temp->next != NULL) {
-            temp = temp->next;
-        }         
-        temp->next = &process_table[slot];
+    if (running_process) {
+        new_proc->parent = running_process;
+        new_proc->next = running_process->children;
+        running_process->children = new_proc;
     }
-    return pid;
+
+    new_proc->next = ready_queues[priority - 1];
+    ready_queues[priority - 1] = new_proc;
+
+    USLOSS_Console("spork(): Process %d added to ready queue %d\n", new_proc->pid, priority - 1);
+    return new_proc->pid;
 }
 
-// join(int *status) - kills the child of the currently running process and
-// frees a slot on the process table. returns the process id of the child if found.
-// If there are no more children, the function returns -2
+
+void processWrapper(void) {
+    USLOSS_Console("processWrapper(): Running PID %d\n", running_process->pid);
+
+    if (running_process == NULL || running_process->startFunc == NULL) {
+        USLOSS_Console("processWrapper(): ERROR - Null function pointer!\n");
+        USLOSS_Halt(1);
+    }
+    
+    int rc = running_process->startFunc(running_process->arg);
+    
+    USLOSS_Console("processWrapper(): Process PID %d returned with status %d, calling quit()\n",
+                    running_process->pid, rc);
+    
+    quit(rc);
+}
+
 int join(int *status) {
     if (status == NULL) {
         USLOSS_Console("ERROR: join() called with NULL status pointer.\n");
@@ -208,11 +178,10 @@ int join(int *status) {
     Process *parent = running_process;
     Process *child = parent->children;
     Process *target = NULL;
-    int highestOrder = -1;  // Initialize to -1 so that any nonnegative termOrder will be higher.
+    int highestOrder = -1;  // Find the most recently terminated child
 
     while (child != NULL) {
-        if (child->status == -1) {
-            // Choose the terminated child with the highest termOrder.
+        if (child->status == -1) {  
             if (child->termOrder > highestOrder) {
                 highestOrder = child->termOrder;
                 target = child;
@@ -222,9 +191,12 @@ int join(int *status) {
     }
 
     if (target != NULL) {
-        *status = target->exit_status;
+        *status = target->exit_status; 
         int childPid = target->pid;
-        // Remove target from the parent's children list.
+
+        USLOSS_Console("join(): Process %d joined with exit status %d\n", childPid, *status);
+
+        // Remove target from parent's children list
         if (parent->children == target) {
             parent->children = target->next;
         } else {
@@ -234,87 +206,154 @@ int join(int *status) {
             if (prev != NULL)
                 prev->next = target->next;
         }
-        // Mark the target as cleaned up.
+
+        // Mark the child as cleaned up
         target->pid = -1;
         target->status = 0;
         return childPid;
     }
-    return -2;  // No terminated children found.
+
+    USLOSS_Console("join(): No terminated children found for PID %d, returning -2\n", running_process->pid);
+    return -2;  // No terminated children found
 }
 
-// TEMP_switchTo(int newpid) - performs a context switch to the process indicated
-// by newpid.
-void TEMP_switchTo(int newpid) {
-    Process *new_process = NULL;
 
-    // Check if we're bootstrapping (no current running process).
-    if (running_process == NULL) {
-        for (int i = 0; i < MAXPROC; i++) {
-            if (process_table[i].pid == newpid) {
-                new_process = &process_table[i];
-                break;
-            }
-        }
-        if (new_process == NULL || new_process->pid == -1) {
-            USLOSS_Halt(1);
-        }
-        running_process = new_process;
-        // Instead of context switching from a non-existent process,
-        // directly start the process by calling processWrapper.
-        processWrapper();
-        USLOSS_Halt(0);
-    }
+ 
+void quit(int status) {
+    USLOSS_Console("quit(): Process %d is terminating with status %d\n", running_process->pid, status);
 
-    for (int i = 0; i < MAXPROC; i++) {
-        if (process_table[i].pid == newpid) {
-            new_process = &process_table[i];
-            break;
-        }
-    }
-    if (new_process == NULL || new_process->pid == -1) {
-        USLOSS_Console("ERROR: TEMP_switchTo(%d) failed, process not found\n", newpid);
+    if (running_process->children) {
+        USLOSS_Console("ERROR: Process %d called quit() with active children.\n", running_process->pid);
         USLOSS_Halt(1);
     }
 
-    Process *old_process = running_process;
-    running_process = new_process;
-    USLOSS_ContextSwitch(&old_process->context, &new_process->context);
+    running_process->status = -1;  // 🚨 Mark process as terminated
+    running_process->exit_status = status;  // 🚨 Store exit status
 
+    USLOSS_Console("quit(): Process %d exit status set to %d\n", running_process->pid, status);
+
+    // Wake up parent if they are waiting (blocked in join)
+    if (running_process->parent) {
+        Process *parent = running_process->parent;
+        if (parent->status == 2) {  // Parent is waiting
+            parent->status = 0;  // Unblock parent
+            USLOSS_Console("quit(): Unblocking parent PID %d\n", parent->pid);
+            dispatcher();
+        }
+    }
+
+    dispatcher();  // Switch to another process
 }
 
-// dumpProcesses() - displays information about the process table in a readable format
-void dumpProcesses() {
-    USLOSS_Console("-**************** Calling dumpProcesses() *******************\n");
-    USLOSS_Console("- PID  PPID  NAME              PRIORITY  STATE\n");
+ 
+ void blockMe(void) {
+     running_process->status = 1;
+     dispatcher();
+ }
+ 
+ int unblockProc(int pid) {
+     for (int i = 0; i < MAXPROC; i++) {
+         if (process_table[i].pid == pid && process_table[i].status == 1) {
+             process_table[i].status = 0;
+             if (!ready_queues[process_table[i].priority - 1]) {
+                 ready_queues[process_table[i].priority - 1] = &process_table[i];
+             } else {
+                 Process *temp = ready_queues[process_table[i].priority - 1];
+                 while (temp->next) temp = temp->next;
+                 temp->next = &process_table[i];
+             }
+             dispatcher();
+             return 0;
+         }
+     }
+     return -2;
+ }
+ 
+ void zap(int pid) {
+     for (int i = 0; i < MAXPROC; i++) {
+         if (process_table[i].pid == pid) {
+             running_process->status = 2;
+             dispatcher();
+             return;
+         }
+     }
+     USLOSS_Console("ERROR: Attempted to zap invalid PID %d.\n", pid);
+     USLOSS_Halt(1);
+ }
+ 
+ void dispatcher(void) {
 
-    for (int i = 0; i < MAXPROC; i++) {
-        if (process_table[i].pid != -1) {
-            int pid = process_table[i].pid;
-            int ppid = (process_table[i].parent != NULL) ? process_table[i].parent->pid : 0;
-            char state[32];
-            
-            if (running_process && process_table[i].pid == running_process->pid) {
-                strcpy(state, "Running");
-            } else if (process_table[i].status == -1) {
-                snprintf(state, sizeof(state), "Terminated(%d)", process_table[i].exit_status);
-            } else {
-                strcpy(state, "Runnable");
+    for (int i = 0; i < 6; i++) {
+        if (ready_queues[i]) {
+            Process *next = ready_queues[i];
+
+            // 🚨 Ensure we are not switching to the currently running process
+            if (running_process == next) {
+                return;
             }
+
+            ready_queues[i] = ready_queues[i]->next;
+            next->next = NULL;
             
-            USLOSS_Console("- %-4d %-5d %-17s %-9d %-15s\n", pid, ppid, process_table[i].name, process_table[i].priority, state);
+            contextSwitch(next);
+            return;
         }
+    }
+
+    USLOSS_Console("dispatcher(): No ready processes found. Halting.\n");
+    USLOSS_Halt(0);
+}
+
+
+
+void contextSwitch(Process *next) {
+    if (running_process == next) {
+        return;
+    }
+
+    USLOSS_Console("contextSwitch(): Switching from PID %d to PID %d\n",
+                    running_process ? running_process->pid : -1, next->pid);
+
+    Process *old_process = running_process;
+    running_process = next;
+
+    if (old_process) {
+        USLOSS_Console("contextSwitch(): Performing USLOSS_ContextSwitch...\n");
+        USLOSS_ContextSwitch(&old_process->context, &running_process->context);
+        USLOSS_Console("contextSwitch(): ERROR - We should never return here!\n");
+        USLOSS_Halt(1);
+    } else {
+        USLOSS_Console("contextSwitch(): No old process, calling processWrapper() for PID %d\n", running_process->pid);
+        processWrapper();
     }
 }
 
-int getpid() {
-    return running_process ? running_process->pid : -1;
-}
 
-void blockMe() {
-    // SKIP
-}
 
-int unblockProc(int pid) {
-    // SKIP
-    return 0;
+void dumpProcesses(void) {
+    USLOSS_Console("PID  PPID  NAME              PRIORITY  STATE\n");
+    for (int i = 0; i < MAXPROC; i++) {
+        if (process_table[i].pid != -1) {
+            int pid = process_table[i].pid;
+            // If the process has a parent, print its PID; otherwise, 0.
+            int ppid = (process_table[i].parent != NULL) ? process_table[i].parent->pid : 0;
+            char state[32];
+            
+            // If this process is currently running, mark as "Running".
+            if (running_process && process_table[i].pid == running_process->pid) {
+                strcpy(state, "Running");
+            }
+            // If the process is terminated (status == -1), print "Terminated(exit_status)".
+            else if (process_table[i].status == -1) {
+                snprintf(state, sizeof(state), "Terminated(%d)", process_table[i].exit_status);
+            }
+            else {
+                strcpy(state, "Runnable");
+            }
+            
+            // Print the process info with right-aligned PID and PPID.
+            USLOSS_Console(" %4d %4d %-17s %-9d %-15s\n", pid, ppid, process_table[i].name, process_table[i].priority, state);
+        }
+    }
 }
+ 
