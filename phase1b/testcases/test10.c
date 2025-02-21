@@ -40,10 +40,12 @@ int XXp1(void *arg)
     USLOSS_Console("XXp1(): spork of second child returned pid = %d\n", kidpid2);
 
     USLOSS_Console("XXp1(): zap'ing first child\n");
+    USLOSS_Console("%d\n", kidpid1);
     zap(kidpid1);
     USLOSS_Console("XXp1(): after zap'ing first child\n");
 
     USLOSS_Console("XXp1(): zap'ing second child\n");
+    dumpProcesses();
     zap(kidpid2);
     USLOSS_Console("XXp1(): after zap'ing second child\n");
 

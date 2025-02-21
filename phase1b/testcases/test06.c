@@ -46,7 +46,6 @@ int XXp1(void *arg)
     USLOSS_Console("XXp1(): performing second join\n");
     kidpid = join(&status);
     USLOSS_Console("XXp1(): second join returned kidpid = %d, status = %d\n", kidpid, status);
-
     quit(3);
 }
 
