@@ -21,20 +21,24 @@
 // Process structure definition.
 // This structure holds all the necessary fields for a process.
 typedef struct process {
-    int pid;                // Unique process identifier.
-    int priority;           // Process priority (lower numbers indicate higher priority).
-    int status;             // Process status: 0 means runnable, -1 means terminated.
-    char name[MAXNAME];     // Process name.
-    struct process* children; // Pointer to the head of the linked list of child processes.
-    struct process* next;   // Pointer to the next process in a linked list (e.g., in parent's children list).
-    struct process *parent; // Pointer to the parent process.
-    USLOSS_Context context; // Process context (for context switching).
-    char *stack;            // Pointer to the process's stack.
-    int (*startFunc)(void *); // Function pointer to the process's starting function.
-    void *arg;              // Argument to be passed to the start function.
-    int exit_status;        // Exit status of the process when it terminates.
-    int termOrder;          // Termination order (used to determine join() order).
+    int pid;                // current pid (set to -1 when the slot is free)
+    int original_pid;       // original pid assigned at creation
+    int priority;           
+    int status;             
+    char name[MAXNAME];     
+    struct process* children; 
+    struct process* sibling;   
+    struct process* next;      
+    struct process *parent; 
+    USLOSS_Context context; 
+    char *stack;            
+    int (*startFunc)(void *); 
+    void *arg;              
+    int exit_status;        
+    int termOrder;          
+    struct process *zapped_by;  
 } Process;
+
 
 // Prototype for the main test case function.
 extern int testcase_main(void *arg);
@@ -78,5 +82,7 @@ int unblockProc(int pid);
 void dispatcher(void);
 
 void contextSwitch(Process *next);
+
+void remove_from_ready_queue(Process *p);
 
 #endif
