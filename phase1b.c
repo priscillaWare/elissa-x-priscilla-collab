@@ -68,7 +68,7 @@ void phase1_init(void) {
 
     for (int i = 0; i < MAXPROC; i++) {
         process_table[i].pid = -1;
-        process_table[i].status = 0;
+        process_table[i].status = -1;
         process_table[i].children = NULL;
         process_table[i].next = NULL;
         process_table[i].parent = NULL;
@@ -142,13 +142,21 @@ int spork(char *name, int (*startFunc)(void*), void *arg, int stackSize, int pri
     if (running_process) {
         new_proc->parent = running_process;
         new_proc->next = running_process->children;
-        running_process->children = new_proc;
+        Process *cur = running_process;
+        while (cur->children != NULL) {
+            cur = cur->children;
+
+        }
+        cur->children = new_proc;
     }
 
     new_proc->next = ready_queues[priority - 1];
     ready_queues[priority - 1] = new_proc;
 
     USLOSS_Console("spork(): Process %d added to ready queue %d\n", new_proc->pid, priority - 1);
+    USLOSS_Console("spork(): calling dispatcher()\n");
+
+    dispatcher();      // added
     return new_proc->pid;
 }
 
@@ -181,13 +189,22 @@ int join(int *status) {
     int highestOrder = -1;  // Find the most recently terminated child
 
     while (child != NULL) {
-        if (child->status == -1) {  
+        USLOSS_Console("join(): looking for children\n");
+        USLOSS_Console("join(): child found: %s\n", child->name);
+        USLOSS_Console("join(): child status: %d\n", child->status);
+        if (child->status == -1) {
             if (child->termOrder > highestOrder) {
                 highestOrder = child->termOrder;
                 target = child;
+                break;
             }
         }
-        child = child->next;
+        if (child->status == 0) {
+          blockMe();
+          target = child;
+          break;
+        }
+        child = child->children;
     }
 
     if (target != NULL) {
@@ -198,7 +215,8 @@ int join(int *status) {
 
         // Remove target from parent's children list
         if (parent->children == target) {
-            parent->children = target->next;
+          USLOSS_Console("join(): rearranging children list\n");
+            parent->children = target->children;
         } else {
             Process *prev = parent->children;
             while (prev != NULL && prev->next != target)
@@ -209,7 +227,7 @@ int join(int *status) {
 
         // Mark the child as cleaned up
         target->pid = -1;
-        target->status = 0;
+        target->status = -1;
         return childPid;
     }
 
@@ -220,6 +238,7 @@ int join(int *status) {
 
  
 void quit(int status) {
+
     USLOSS_Console("quit(): Process %d is terminating with status %d\n", running_process->pid, status);
 
     if (running_process->children) {
@@ -235,13 +254,12 @@ void quit(int status) {
     // Wake up parent if they are waiting (blocked in join)
     if (running_process->parent) {
         Process *parent = running_process->parent;
-        if (parent->status == 2) {  // Parent is waiting
+        if (parent->status == 1) {  // Parent is waiting
             parent->status = 0;  // Unblock parent
-            USLOSS_Console("quit(): Unblocking parent PID %d\n", parent->pid);
+            USLOSS_Console("quit(): child quits: getting parent %d\n", parent->pid);
             dispatcher();
         }
     }
-
     dispatcher();  // Switch to another process
 }
 
@@ -284,17 +302,19 @@ void quit(int status) {
  void dispatcher(void) {
 
     for (int i = 0; i < 6; i++) {
-        if (ready_queues[i]) {
+        if (ready_queues[i] != NULL && ready_queues[i]->status != -1 && running_process != ready_queues[i]) {
+            USLOSS_Console("dispatcher(): process is %s in slot %d with status: %d and id: %d\n", ready_queues[i]->name, i, ready_queues[i]->status, ready_queues[i]->pid);
             Process *next = ready_queues[i];
 
             // 🚨 Ensure we are not switching to the currently running process
-            if (running_process == next) {
+            if (ready_queues[i]->parent != NULL && ready_queues[i]->priority > ready_queues[i]->parent->priority && ready_queues[i]->parent->status != 1) {
+                USLOSS_Console("dispatcher(): no switch here\n");
                 return;
             }
 
-            ready_queues[i] = ready_queues[i]->next;
-            next->next = NULL;
-            
+            //ready_queues[i] = ready_queues[i]->next;
+            //next->next = NULL;
+
             contextSwitch(next);
             return;
         }
@@ -307,6 +327,7 @@ void quit(int status) {
 
 
 void contextSwitch(Process *next) {
+
     if (running_process == next) {
         return;
     }
@@ -315,13 +336,21 @@ void contextSwitch(Process *next) {
                     running_process ? running_process->pid : -1, next->pid);
 
     Process *old_process = running_process;
+    if (running_process == NULL) {
+      old_process = NULL;
+    }
     running_process = next;
+    USLOSS_Console("contextSwitch(): switching to %s\n", running_process->name);
 
-    if (old_process) {
+    if (&running_process == NULL){
+      USLOSS_Console("contextSwitch(): ?????.\n");
+      }
+
+    if (old_process != NULL) {
         USLOSS_Console("contextSwitch(): Performing USLOSS_ContextSwitch...\n");
         USLOSS_ContextSwitch(&old_process->context, &running_process->context);
-        USLOSS_Console("contextSwitch(): ERROR - We should never return here!\n");
-        USLOSS_Halt(1);
+        //USLOSS_Console("contextSwitch(): ERROR - We should never return here!\n");
+        //USLOSS_Halt(1);
     } else {
         USLOSS_Console("contextSwitch(): No old process, calling processWrapper() for PID %d\n", running_process->pid);
         processWrapper();
