@@ -249,7 +249,7 @@ int join(int *status) {
         }
 
         parent->status = 1;
-        remove_from_ready_queue(parent);
+        //remove_from_ready_queue(parent);
         dispatcher();
     }
 }
@@ -272,15 +272,14 @@ void quit(int status) {
     // Unblock parent if waiting on join()
     if (running_process->parent && running_process->parent->status == 1) {
         running_process->parent->status = 0;  // 0 = Runnable
-        int prio = running_process->parent->priority - 1;
-        running_process->parent->next = ready_queues[prio];
-        ready_queues[prio] = running_process->parent;
+        //int prio = running_process->parent->priority - 1;
+        //running_process->parent->next = ready_queues[prio];
+        //ready_queues[prio] = running_process->parent;
     }
 
     // Unblock any process waiting via zap()
     for (int i = 0; i < MAXPROC; i++) {
         if (process_table[i].status == 1 && process_table[i].zap_target == running_process) {
-          USLOSS_Console("quit(): unblocking process process: %s\n", process_table[i].status);
             process_table[i].status = 0;  // 0 = Runnable
             process_table[i].zap_target = NULL;
             int prio = process_table[i].priority - 1;
@@ -362,7 +361,7 @@ void dispatcher(void) {
 
     // Find the highest-priority process to run
     for (int i = 0; i < 6; i++) {
-        if (ready_queues[i] != NULL && ready_queues[i]->status != 1 && running_process->pid != ready_queues[i]->pid) {
+        if (ready_queues[i] != NULL && ready_queues[i]->status != 1) {
             next = ready_queues[i];
             break;
         }
@@ -378,9 +377,7 @@ void dispatcher(void) {
 
 
 void contextSwitch(Process *next) {
-    USLOSS_Console("dispatcher(): next is %s with status %d\n", next->name, next->exit_status);
     if (running_process == next) {
-        USLOSS_Console("FUCK\n");
         USLOSS_Halt(0);
         return;
     }
@@ -431,7 +428,6 @@ void dumpProcesses(void) {
 
 
 void remove_from_ready_queue(Process *p) {
-  USLOSS_Console("removing: %s\n", p->name);
     int prio = p->priority;
     Process **cur = &ready_queues[prio - 1];
     while (*cur != NULL) {
