@@ -11,16 +11,16 @@
  #include <string.h>
  #include "phase1b.h"
  #include "usloss.h"
- 
+
  static Process process_table[MAXPROC];
  Process *running_process = NULL;
  static int next_pid = 0;
- 
+
  // Queues for scheduling
  static Process *ready_queues[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
- 
+
 extern int testcase_main(void *arg);
- 
+
 int init_run(void *arg) {
 
     int current = USLOSS_PsrGet();
@@ -33,7 +33,7 @@ int init_run(void *arg) {
     extern void phase3_start_service_processes(void);
     extern void phase4_start_service_processes(void);
     extern void phase5_start_service_processes(void);
-    
+
     // Call the service process functions so their messages are printed.
     phase2_start_service_processes();
     phase3_start_service_processes();
@@ -90,7 +90,7 @@ void phase1_init(void) {
         USLOSS_Halt(1);
     }
     init_proc->stack = init_stack;
-    
+
     USLOSS_ContextInit(&init_proc->context, init_stack, USLOSS_MIN_STACK, NULL, processWrapper);
     ready_queues[5] = init_proc;  // Priority 6 goes to ready_queues[5]
     next_pid += 2;
@@ -228,7 +228,7 @@ int join(int *status) {
         Process *prev = NULL;
         Process *child = parent->children;
         while (child != NULL) {
-            if (child->status == -1) {  
+            if (child->status == -1) {
                 *status = child->exit_status;
                 int childPid = child->pid;
 
@@ -239,7 +239,7 @@ int join(int *status) {
 
                 free(child->stack);
                 child->stack = NULL;
-                child->pid = -1;  
+                child->pid = -1;
                 child->sibling = NULL;
 
                 return childPid;
@@ -250,11 +250,11 @@ int join(int *status) {
 
         parent->status = 1;
         remove_from_ready_queue(parent);
-        dispatcher();  
+        dispatcher();
     }
 }
 
- 
+
 void quit(int status) {
     if ((USLOSS_PsrGet() & USLOSS_PSR_CURRENT_MODE) == 0) {
         USLOSS_Console("ERROR: Someone attempted to call quit while in user mode!\n");
@@ -265,10 +265,10 @@ void quit(int status) {
         USLOSS_Console("ERROR: Process %d quitting with active children!\n", running_process->pid);
         USLOSS_Halt(1);
     }
-    
+
     running_process->status = -1;  // TERMINATED (was 2)
     running_process->exit_status = status;
-    
+
     // Unblock parent if waiting on join()
     if (running_process->parent && running_process->parent->status == 1) {
         running_process->parent->status = 0;  // 0 = Runnable
@@ -276,10 +276,11 @@ void quit(int status) {
         running_process->parent->next = ready_queues[prio];
         ready_queues[prio] = running_process->parent;
     }
-    
+
     // Unblock any process waiting via zap()
     for (int i = 0; i < MAXPROC; i++) {
         if (process_table[i].status == 1 && process_table[i].zap_target == running_process) {
+          USLOSS_Console("quit(): unblocking process process: %s\n", process_table[i].status);
             process_table[i].status = 0;  // 0 = Runnable
             process_table[i].zap_target = NULL;
             int prio = process_table[i].priority - 1;
@@ -287,10 +288,10 @@ void quit(int status) {
             ready_queues[prio] = &process_table[i];
         }
     }
-    
+
     remove_from_ready_queue(running_process);
     dispatcher();
-    
+
 }
 
 
@@ -299,7 +300,7 @@ void blockMe(void) {
      running_process->status = 1;
      dispatcher();
 }
- 
+
 
 int unblockProc(int pid) {
     for (int i = 0; i < MAXPROC; i++) {
@@ -318,7 +319,7 @@ int unblockProc(int pid) {
      }
     return -2;
 }
- 
+
 
 void zap(int pid) {
     if (pid == running_process->pid) {
@@ -337,22 +338,22 @@ void zap(int pid) {
         USLOSS_Console("ERROR: Attempted to zap a non-existent process (PID %d).\n", pid);
         USLOSS_Halt(1);
     }
-    
+
     // If the target is already terminated, return immediately
     if (target->status == -1)
         return;
-    
+
     running_process->status = 1;  // Block self
     running_process->zap_target = target;
-    
-    remove_from_ready_queue(running_process);
+
+    //remove_from_ready_queue(running_process);
     dispatcher();
-    
+
     // Instead of checking target->status, wait until our zap_target gets cleared
-    while (running_process->zap_target != NULL) {
-        dispatcher();
-    }
-    
+    //while (target->pid != -1) {
+       // dispatcher();
+   // }
+
 }
 
 
@@ -361,9 +362,9 @@ void dispatcher(void) {
 
     // Find the highest-priority process to run
     for (int i = 0; i < 6; i++) {
-        if (ready_queues[i] != NULL) {
+        if (ready_queues[i] != NULL && ready_queues[i]->status != 1 && running_process->pid != ready_queues[i]->pid) {
             next = ready_queues[i];
-            break;  
+            break;
         }
     }
 
@@ -371,12 +372,16 @@ void dispatcher(void) {
         USLOSS_Console("ERROR: No ready processes! Halting.\n");
         USLOSS_Halt(0);
     }
+
     contextSwitch(next);
 }
 
 
 void contextSwitch(Process *next) {
+    USLOSS_Console("dispatcher(): next is %s with status %d\n", next->name, next->exit_status);
     if (running_process == next) {
+        USLOSS_Console("FUCK\n");
+        USLOSS_Halt(0);
         return;
     }
 
@@ -409,7 +414,7 @@ void dumpProcesses(void) {
             } else if (process_table[i].status == -1) {
                 snprintf(state, sizeof(state), "Terminated(%d)", process_table[i].exit_status);
             } else if (process_table[i].status == 2) {  // ✅ Show Zapped status
-                snprintf(state, sizeof(state), "Zapped (waiting on PID %d)", 
+                snprintf(state, sizeof(state), "Zapped (waiting on PID %d)",
                          process_table[i].zap_target ? process_table[i].zap_target->pid : -1);
             } else if (process_table[i].status == 1) {
                 strcpy(state, "Blocked(waiting for zap target to quit)");
@@ -426,6 +431,7 @@ void dumpProcesses(void) {
 
 
 void remove_from_ready_queue(Process *p) {
+  USLOSS_Console("removing: %s\n", p->name);
     int prio = p->priority;
     Process **cur = &ready_queues[prio - 1];
     while (*cur != NULL) {
