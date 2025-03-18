@@ -21,20 +21,20 @@
 // Process structure definition.
 // This structure holds all the necessary fields for a process.
 typedef struct process {
-    int pid;                     // Process ID
-    int priority;                 // Process priority
-    int status;                   // 0 = runnable, 1 = blocked, -1 = terminated
-    int exit_status;              // Status code on exit
-    struct process *parent;       // Parent process
-    struct process *children;     // Linked list of child processes
-    struct process *sibling;      // Sibling process
-    struct process *next;         // Next process in ready queue
-    struct process *zap_target;   // ✅ NEW: Process being zapped
-    void *stack;                  // ✅ Process stack
-    char name[MAXNAME];           // ✅ Process name
-    int (*startFunc)(void*);      // ✅ Function pointer for process entry point
-    void *arg;                    // ✅ Argument to pass to start function
-    USLOSS_Context context;       // ✅ USLOSS context for process switching
+    int pid;                   
+    int priority;             
+    int status;                  
+    int exit_status;              
+    struct process *parent;       
+    struct process *children;    
+    struct process *sibling;    
+    struct process *next;       
+    struct process *zap_target;   
+    void *stack;                 
+    char name[MAXNAME];          
+    int (*startFunc)(void*);      
+    void *arg;                 
+    USLOSS_Context context;       
 } Process;
 
 
