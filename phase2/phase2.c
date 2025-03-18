@@ -10,8 +10,8 @@ Mbox mailboxes[MAXMBOX];
 MailSlot mailSlots[MAXSLOTS];
 void (*systemCallVec[MAXSYSCALLS])(int, void*);
 
-#define MAX_PROCS 100
-ShadowPCB shadowProcs[MAX_PROCS];
+//#define MAX_PROCS 100
+Process shadowProcesses[MAX_PROC];
 
 /* Forward declaration for our default syscall handler */
 static void nullsys(int callNum, void *arg);
@@ -68,9 +68,9 @@ int MboxSend(int mailboxID, void *message, int messageSize) {
     Mbox *mbox = &mailboxes[mailboxID];
 
     // First, check if a consumer is waiting.
-    if (!queue_is_empty(mbox->consumerQueue)) {
+    if (!queue_is_empty(mbox->consumers)) {
         // Remove the first waiting consumer from the consumer queue.
-        Process *consumer = dequeue(mbox->consumerQueue);
+        Process *consumer = dequeue(mbox->consumers);
         // Deliver the message directly to the consumer.
         if (consumer->recvBuffer && consumer->maxRecvSize >= messageSize) {
             if (messageSize > 0)
@@ -101,13 +101,13 @@ int MboxSend(int mailboxID, void *message, int messageSize) {
             if (messageSize > 0)
                 memcpy(mailSlots[slotFound].message, message, messageSize);
             // Enqueue the slot index into the mailbox's slot queue.
-            enqueue(mbox->slotQueue, slotFound);
+            enqueue(mbox->slots, slotFound);
             return 0;
         }
         // No free mail slot is available: block the producer.
         // Before blocking, add the producer to the mailbox's producer waiting queue.
-        Process *producer = current_process();  
-        enqueue(mbox->producerQueue, producer);
+        Process *producer = current_process();
+        enqueue(mbox->producers, producer);
 
         // Block the producer until a mail slot is freed.
         block(producer);
@@ -135,9 +135,9 @@ int MboxRecv(int mailboxID, void *message, int maxMessageSize) {
     // Loop until we can deliver a message.
     while (1) {
         // First, check if there is a queued message in the mailbox's slot queue.
-        if (!queue_is_empty(mbox->slotQueue)) {
+        if (!queue_is_empty(mbox->slots)) {
             // Remove the oldest queued message (mail slot index) from the slot queue.
-            int slotIndex = dequeue(mbox->slotQueue);
+            int slotIndex = dequeue(mbox->slots);
             int msgLen = mailSlots[slotIndex].messageLength;
             if (msgLen > maxMessageSize) {
                 // Message is too large for the receiver's buffer.
@@ -152,8 +152,8 @@ int MboxRecv(int mailboxID, void *message, int maxMessageSize) {
             mailSlots[slotIndex].used = 0;
 
             // If any producers are blocked waiting for a free slot, wake one.
-            if (!queue_is_empty(mbox->producerQueue)) {
-                Process *producer = dequeue(mbox->producerQueue);
+            if (!queue_is_empty(mbox->producers)) {
+                Process *producer = dequeue(mbox->producers);
                 wakeup(producer);
             }
             return msgLen;
@@ -163,7 +163,7 @@ int MboxRecv(int mailboxID, void *message, int maxMessageSize) {
         consumer->recvBuffer = message;
         consumer->maxRecvSize = maxMessageSize;
         // Enqueue the consumer on the mailbox's consumer waiting queue.
-        enqueue(mbox->consumerQueue, consumer);
+        enqueue(mbox->consumers, consumer);
 
         // Block the consumer until a message is delivered.
         block(consumer);
@@ -181,7 +181,7 @@ int MboxRecv(int mailboxID, void *message, int maxMessageSize) {
 /* MboxCondSend: Conditional send that returns -2 immediately if it would block.
  */
 int MboxCondSend(int mailboxID, void *message, int messageSize) {
-    /* 
+    /*
      * For the conditional version, if no slot is available and no consumer is waiting,
      * immediately return -2 instead of blocking.
      */
@@ -231,7 +231,7 @@ void waitDevice(int type, int unit, int *status) {
         exit(1);
     }
 
-    /* 
+    /*
      * In a full implementation, waitDevice() would block on the mailbox corresponding
      * to the device until an interrupt is delivered. Once an interrupt occurs,
      * the handler would send a message (with the device status) to that mailbox.
@@ -252,7 +252,7 @@ static void nullsys(int callNum, void *arg) {
 }
 
 /* phase2_init: Initialize Phase 2 data structures.
- * This is called during bootstrap 
+ * This is called during bootstrap
  */
 void phase2_init(void) {
     // Initialize mailboxes.
