@@ -5,7 +5,7 @@
 #ifndef _PHASE2_H
 #define _PHASE2_H
 
-#include <usyscall.h>
+#include "usyscall.h"
 
 // Maximum line length. Used by terminal read and write.
 #define MAXLINE         80
@@ -28,15 +28,16 @@ typedef struct MailSlot {
     int id;                  // slot ID
     int mailboxID;           // mailbox ID
     int messageLength;
-    int used;
+    int inUse;
     char message[MAX_MESSAGE];
+    struct MailSlot *next;
 } MailSlot;
 
-typedef struct ShadowPCB {
+typedef struct Process {
     int pid;
     int blockedOn;           // mailbox ID it is blocked on (-1 if not blocked)
-    struct ShadowPCB *next;  // Next process in queue
-} ShadowPCB;
+    struct Processs *next;  // Next process in queue
+} Process;
 
 extern void phase2_init(void);
 
@@ -67,3 +68,4 @@ extern void wakeupByDevice(int type, int unit, int status);
 extern void (*systemCallVec[])(USLOSS_Sysargs *args);
 
 #endif
+
