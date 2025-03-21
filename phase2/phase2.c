@@ -3,10 +3,9 @@
 #include "phase2def.h"
 #include "usloss.h"
 #include "phase1.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#define MAX_BLOCKED_CONSUMERS 10
 
 // Global arrays and variables.
 Mbox mailboxes[MAXMBOX];
@@ -24,25 +23,19 @@ struct Process shadowProcesses[MAXPROC];
 static int blockedProducers[MAXMBOX][MAX_BLOCKED_PRODUCERS];
 static int numBlockedProducers[MAXMBOX];
 
-// New definitions for zero-slot mailbox blocked consumers:
+#define MAX_BLOCKED_CONSUMERS 10
 static int blockedConsumers[MAXMBOX][MAX_BLOCKED_CONSUMERS];
 static int numBlockedConsumers[MAXMBOX];
 
 int clockMailbox;
 int terminalStatus = 0;
 
-/*
- * A simple syscall handler.
- * Test40 expects that when a syscall trap is taken, a handler will catch it
- * and then halt. (Syscall number MAXSYSCALLS is invalid.)
- */
-void syscall_handler(int dev, void *arg) {
-    USLOSS_Console("syscall_handler: syscall trap received. Halting.\n");
-    USLOSS_Halt(1);
+void nullsys(USLOSS_Sysargs *args) {
+    /* Implementation of a system call. */
 }
 
-void nullsys(USLOSS_Sysargs *args) {
-    /* Default system call; normally unused */
+void interrupt_handler(int uhhh, void* ummm) {
+    dispatcher();
 }
 
 void clock_interrupt_handler(int dev, void *arg) {
@@ -57,14 +50,17 @@ void clock_interrupt_handler(int dev, void *arg) {
     dispatcher();
 }
 
+void syscall_handler(int dev, void *arg) {
+    USLOSS_Console("syscall_handler: syscall trap received. Halting.\n");
+    USLOSS_Halt(1);
+}
+
 void phase2_init(void) {
+    USLOSS_IntVec[USLOSS_CLOCK_INT] = interrupt_handler;
     for (int i = 0; i < MAXMBOX; i++) {
-        // Reserve IDs 0-6 for system use.
         mailboxes[i].isActive = (i < 6) ? 1 : 0;
         numBlockedProducers[i] = 0;
-        numBlockedConsumers[i] = 0;
     }
-    
     for (int i = 0; i < MAXSLOTS; i++) {
         mailSlots[i].inUse = 0;
         freeSlotQueue[i] = i;
@@ -76,7 +72,7 @@ void phase2_init(void) {
     for (int i = 0; i < MAXSYSCALLS; i++) {
         systemCallVec[i] = nullsys;
     }
-    // Create clock mailbox (1 slot) and install the clock interrupt handler.
+
     clockMailbox = MboxCreate(1, sizeof(int));
     USLOSS_IntVec[USLOSS_CLOCK_INT] = clock_interrupt_handler;
     // Set the syscall vector to our handler so that a syscall trap is caught.
@@ -84,8 +80,7 @@ void phase2_init(void) {
 }
 
 int MboxCreate(int numSlots, int slotSize) {
-    // For test45: if the request is for more than MAXSLOTS, fail.
-    if (numSlots < 0 || numSlots > MAXSLOTS || slotSize < 0 || slotSize > MAX_MESSAGE)
+    if (numSlots < 0 || slotSize < 0 || slotSize > MAX_MESSAGE)
          return -1;
     int id = -1;
     for (int i = 0; i < MAXMBOX; i++){
@@ -96,15 +91,15 @@ int MboxCreate(int numSlots, int slotSize) {
     }
     if (id == -1)
          return -1;
-    
+
     mailboxes[id].id = id;
     mailboxes[id].numSlots = numSlots;
     mailboxes[id].slotSize = slotSize;
     mailboxes[id].isActive = 1;
     mailboxes[id].producers = NULL;
     mailboxes[id].consumers = NULL;
-    
-    mailboxSlotQueues[id].queue = malloc(numSlots * sizeof(int));
+
+    mailboxSlotQueues[id].queue = malloc(numSlots * sizeof(int));    // r we allowed to use malloc?
     if (mailboxSlotQueues[id].queue == NULL) {
          mailboxes[id].isActive = 0;
          return -1;
@@ -113,30 +108,32 @@ int MboxCreate(int numSlots, int slotSize) {
     mailboxSlotQueues[id].head = 0;
     mailboxSlotQueues[id].tail = 0;
     mailboxSlotQueues[id].count = 0;
-    
+
     return id;
 }
 
 /* MboxRelease:
  *  - Marks the mailbox inactive.
- *  - Unblocks all blocked producers and any blocked consumers.
+ *  - Unblocks all blocked producers and any blocked consumer.
  *  - Frees the mailbox's slot queue.
  *  After release, further Send/Recv calls return -1.
  */
 int MboxRelease(int mbox_id) {
     if (mbox_id < 0 || mbox_id >= MAXMBOX || !mailboxes[mbox_id].isActive)
          return -1;
-    
+
     mailboxes[mbox_id].isActive = 0;
-    
+
     for (int i = 0; i < numBlockedProducers[mbox_id]; i++) {
          unblockProc(blockedProducers[mbox_id][i]);
     }
     numBlockedProducers[mbox_id] = 0;
-    
+
     /* For zero-slot mailboxes, unblock all waiting consumers */
     if (mailboxes[mbox_id].numSlots == 0) {
+
          for (int i = 0; i < numBlockedConsumers[mbox_id]; i++) {
+
               unblockProc(blockedConsumers[mbox_id][i]);
          }
          numBlockedConsumers[mbox_id] = 0;
@@ -145,77 +142,267 @@ int MboxRelease(int mbox_id) {
          unblockProc(mailboxes[mbox_id].consumers->pid);
          mailboxes[mbox_id].consumers = NULL;
     }
-    
+
     free(mailboxSlotQueues[mbox_id].queue);
     mailboxSlotQueues[mbox_id].queue = NULL;
     mailboxSlotQueues[mbox_id].count = 0;
     mailboxSlotQueues[mbox_id].head = 0;
     mailboxSlotQueues[mbox_id].tail = 0;
-    
+
     return 0;
 }
 
-/* Unblocks the waiting consumer, if any. */
-void wakeupConsumer(Mbox *mbox) {
-    if (mbox->consumers != NULL) {
-         unblockProc(mbox->consumers->pid);
-         mbox->consumers = NULL;
+/* Unblocks the waiting consumer if one is recorded. */
+void wakeupConsumer(Mbox *mbox, int mbox_id) {
+  //printf("wakeupConsumer: started\n");
+    if (numBlockedConsumers[mbox_id] > 0) {
+      //printf("wakeupProducer: there is a producer waiting.\n");
+         int pid_to_unblock = blockedConsumers[mbox_id][0];
+         for (int i = 0; i < numBlockedConsumers[mbox_id] - 1; i++) {
+             blockedConsumers[mbox_id][i] = blockedConsumers[mbox_id][i+1];
+             //printf("wakeupConsumer: unblocking pid %d\n", blockedConsumers[mbox_id][i]);
+         }
+         numBlockedConsumers[mbox_id] = numBlockedConsumers[mbox_id] - 1;
+         //printf("wakeupConsumer: unblocking pid %d\n", pid_to_unblock);
+         //printf("theres no way in hell this is 5 million dollars\n");
+         unblockProc(pid_to_unblock);
     }
 }
 
 /* Unblocks the first blocked producer for mailbox mbox_id. */
 void wakeupProducer(Mbox *mbox, int mbox_id) {
+    //printf("wakeupProducer: started\n");
     if (numBlockedProducers[mbox_id] > 0) {
+      //printf("wakeupProducer: there is a producer waiting.\n");
          int pid_to_unblock = blockedProducers[mbox_id][0];
          for (int i = 0; i < numBlockedProducers[mbox_id] - 1; i++) {
              blockedProducers[mbox_id][i] = blockedProducers[mbox_id][i+1];
+             //printf("wakeupProducer: unblocking pid %d\n", blockedProducers[mbox_id][i]);
          }
-         numBlockedProducers[mbox_id]--;
+         numBlockedProducers[mbox_id] = numBlockedProducers[mbox_id] - 1;
+         //printf("wakeupProducer: total blocked producers %d\n", numBlockedProducers[mbox_id]);
+         //printf("wakeupProducer: unblocking pid %d\n", pid_to_unblock);
+         //printf("theres no way in hell this is 5 million dollars\n");
          unblockProc(pid_to_unblock);
     }
 }
 
-/* MboxSend: Sends a message to the mailbox. */
 int MboxSend(int mbox_id, void *msg_ptr, int msg_size) {
+    if (mbox_id < 0 || mbox_id >= MAXMBOX || !mailboxes[mbox_id].isActive)
+        return -1;
+    if (msg_size < 0 || msg_size > mailboxes[mbox_id].slotSize)
+        return -1;
+    if (msg_size > 0 && msg_ptr == NULL)
+        return -1;
+
+    Mbox *mbox = &mailboxes[mbox_id];
+    SlotQueue *sq = &mailboxSlotQueues[mbox_id];
+
+    if (!mbox->isActive)
+        return -1;
+
+    // For zero-slot mailboxes, handle direct producer-consumer synchronization
+    if (mbox->numSlots == 0) {
+        // Check if there's a consumer waiting
+        if (mbox->consumers != NULL) {
+            // Direct message transfer to waiting consumer
+            Process *consumer = mbox->consumers;
+            // Copy message to consumer's buffer (handled by consumer's MboxRecv)
+            // The consumer will take care of copying the message
+
+            // Unblock the consumer
+            //printf("MboxSend: directly unblocking consumer %d\n", consumer->pid);
+            unblockProc(consumer->pid);
+            mbox->consumers = NULL;
+            return 0;
+        } else {
+            // No consumer waiting, block this producer
+            int pid = getpid();
+
+            // Store producer PID and message info
+            if (numBlockedProducers[mbox_id] < MAX_BLOCKED_PRODUCERS) {
+                blockedProducers[mbox_id][numBlockedProducers[mbox_id]++] = pid;
+            }
+
+            // Store producer's message
+            mbox->producers = &shadowProcesses[pid % MAXPROC];
+            mbox->producers->pid = pid;
+
+            // Block until a consumer arrives
+            //printf("MboxSend: blocking process %d on zero-slot mailbox\n", pid);
+            blockMe();
+
+            if (!mbox->isActive)
+                return -1;
+
+            return 0;
+        }
+    }
+
+    // For mailboxes with slots, handle as before
+    if (freeSlotCount == 0)
+        return -2;
+
+    while (sq->count >= mbox->numSlots && mbox->numSlots > 0) {
+        if (!mbox->isActive)
+            return -1;
+        int pid = getpid();
+        int alreadyBlocked = 0;
+        for (int i = 0; i < numBlockedProducers[mbox_id]; i++) {
+            //printf("MboxSend: checking blocked producer %d\n", blockedProducers[mbox_id][i]);
+            if (blockedProducers[mbox_id][i] == pid) {
+                alreadyBlocked = 1;
+                break;
+            }
+        }
+        if (!alreadyBlocked) {
+            if (numBlockedProducers[mbox_id] < MAX_BLOCKED_PRODUCERS) {
+                blockedProducers[mbox_id][numBlockedProducers[mbox_id]++] = pid;
+            }
+        }
+       // printf("MboxSend: blocking process %d\n", pid);
+        //printf("current process %d\n", getpid());
+        blockMe();
+        //printf("MboxSend: after blockMe()\n");
+        if (!mbox->isActive)
+            return -1;
+    }
+
+    // Normal slot-based mailbox handling
+    int slotIndex = freeSlotQueue[--freeSlotCount];
+    mailSlots[slotIndex].inUse = 1;
+    mailSlots[slotIndex].mailboxID = mbox_id;
+    mailSlots[slotIndex].messageLength = msg_size;
+    memcpy(mailSlots[slotIndex].message, msg_ptr, msg_size);
+
+    sq->queue[sq->tail] = slotIndex;
+    sq->tail = (sq->tail + 1) % sq->capacity;
+    sq->count++;
+
+    if (mbox->consumers != NULL) {
+        //printf("MboxSend: waking up consumer %d\n", mbox->consumers->pid);
+        wakeupConsumer(mbox, mbox_id);
+    }
+
+    //printf("MboxSend: returning\n");
+    return 0;
+}
+
+int MboxRecv(int mbox_id, void *msg_ptr, int msg_max_size) {
+    if (mbox_id < 0 || mbox_id >= MAXMBOX || !mailboxes[mbox_id].isActive)
+        return -1;
+    if (msg_max_size < 0)
+        return -1;
+
+    Mbox *mbox = &mailboxes[mbox_id];
+    SlotQueue *sq = &mailboxSlotQueues[mbox_id];
+
+    //printf("MboxRecv: started\n");
+
+    // For zero-slot mailboxes, handle direct producer-consumer synchronization
+    if (mbox->numSlots == 0) {
+        // Check if there's a producer waiting
+        if (numBlockedProducers[mbox_id] > 0) {
+            int producer_pid = blockedProducers[mbox_id][0];
+
+            // Get producer's message (need to implement message storage for blocked producers)
+            // This would require storing the message pointer and size for each blocked producer
+
+            // Shift the queue of blocked producers
+            for (int i = 0; i < numBlockedProducers[mbox_id] - 1; i++) {
+                blockedProducers[mbox_id][i] = blockedProducers[mbox_id][i+1];
+            }
+            numBlockedProducers[mbox_id]--;
+
+            // Unblock the producer
+            //printf("MboxRecv: unblocking producer %d on zero-slot mailbox\n", producer_pid);
+            unblockProc(producer_pid);
+
+            return 0;  // The message exchange is direct, no size to return
+        } else {
+            // No producer waiting, block this consumer
+            int pid = getpid();
+
+            // Add to list of blocked consumers
+            if (numBlockedConsumers[mbox_id] < MAX_BLOCKED_CONSUMERS) {
+                blockedConsumers[mbox_id][numBlockedConsumers[mbox_id]++] = pid;
+            }
+
+            mbox->consumers = &shadowProcesses[pid % MAXPROC];
+            mbox->consumers->pid = pid;
+
+            // Block until a producer arrives
+            //printf("MboxRecv: blocking consumer %d on zero-slot mailbox\n", pid);
+            blockMe();
+
+            if (!mbox->isActive)
+                return -1;
+
+            return 0;  // For zero-slot mailboxes, return 0 as success
+        }
+    }
+
+    // For regular mailboxes with slots
+    if (sq->count == 0) {
+        int pid = getpid();
+        // Add this process to the blocked consumers array
+        if (numBlockedConsumers[mbox_id] < MAX_BLOCKED_CONSUMERS) {
+            blockedConsumers[mbox_id][numBlockedConsumers[mbox_id]++] = pid;
+        }
+        mbox->consumers = &shadowProcesses[pid % MAXPROC];
+        mbox->consumers->pid = pid;
+        //printf("MboxRecv: blocking\n");
+        blockMe();
+        if (!mbox->isActive)
+            return -1;
+        mbox->consumers = NULL;
+    }
+
+    if (sq->count == 0) {
+        // If we got here and there's still no message, the mailbox was released
+        return -1;
+    }
+
+    int slotIndex = sq->queue[sq->head];
+    sq->head = (sq->head + 1) % sq->capacity;
+    sq->count--;
+
+    if (msg_max_size < mailSlots[slotIndex].messageLength)
+        return -1;
+
+    memcpy(msg_ptr, mailSlots[slotIndex].message, mailSlots[slotIndex].messageLength);
+    int ret = mailSlots[slotIndex].messageLength;
+
+    mailSlots[slotIndex].inUse = 0;
+    freeSlotQueue[freeSlotCount++] = slotIndex;
+
+    //printf("MboxRecv: waking up producer\n");
+    wakeupProducer(mbox, mbox_id);
+
+    return ret;
+}
+
+
+
+int MboxCondSend(int mbox_id, void *msg_ptr, int msg_size) {
     if (mbox_id < 0 || mbox_id >= MAXMBOX || !mailboxes[mbox_id].isActive)
          return -1;
     if (msg_size < 0 || msg_size > mailboxes[mbox_id].slotSize)
          return -1;
     if (msg_size > 0 && msg_ptr == NULL)
          return -1;
-    
+
     Mbox *mbox = &mailboxes[mbox_id];
-    
-    /* Special handling for zero-slot mailboxes: Direct delivery */
-    if (mbox->numSlots == 0) {
-        int pid = getpid();
-        int alreadyBlocked = 0;
-        for (int i = 0; i < numBlockedProducers[mbox_id]; i++) {
-             if (blockedProducers[mbox_id][i] == pid) {
-                 alreadyBlocked = 1;
-                 break;
-             }
-        }
-        if (!alreadyBlocked) {
-             if (numBlockedProducers[mbox_id] < MAX_BLOCKED_PRODUCERS)
-                 blockedProducers[mbox_id][numBlockedProducers[mbox_id]++] = pid;
-        }
-        while (mailboxes[mbox_id].consumers == NULL) {
-             blockMe();
-             if (!mbox->isActive)
-                  return -1;
-        }
-        wakeupConsumer(mbox);
-        return 0;
-    }
-    
-    /* For normal (non-zero-slot) mailboxes: */
     SlotQueue *sq = &mailboxSlotQueues[mbox_id];
-    
+
+    if (!mbox->isActive)
+         return -1;
+
     if (freeSlotCount == 0)
          return -2;
-    
-    while (sq->count >= mailboxes[mbox_id].numSlots) {
+
+    while (sq->count >= mbox->numSlots) {
+         //printf("MboxCondSend: waiting for space in mailbox %d\n", mbox_id);
          if (!mbox->isActive)
              return -1;
          int pid = getpid();
@@ -227,164 +414,97 @@ int MboxSend(int mbox_id, void *msg_ptr, int msg_size) {
              }
          }
          if (!alreadyBlocked) {
-             if (numBlockedProducers[mbox_id] < MAX_BLOCKED_PRODUCERS)
-                 blockedProducers[mbox_id][numBlockedProducers[mbox_id]++] = pid;
+         //    if (numBlockedProducers[mbox_id] < MAX_BLOCKED_PRODUCERS)  {
+         //        blockedProducers[mbox_id][numBlockedProducers[mbox_id]++] = pid;
+         //        printf("MboxCondSend: ADDED TO BLOCKED PRODUCER Q %d\n", pid);  }
+
          }
-         blockMe();
+         return -2;
          if (!mbox->isActive)
              return -1;
     }
-    
+
     int slotIndex = freeSlotQueue[--freeSlotCount];
     mailSlots[slotIndex].inUse = 1;
     mailSlots[slotIndex].mailboxID = mbox_id;
     mailSlots[slotIndex].messageLength = msg_size;
     memcpy(mailSlots[slotIndex].message, msg_ptr, msg_size);
-    
+
     sq->queue[sq->tail] = slotIndex;
     sq->tail = (sq->tail + 1) % sq->capacity;
     sq->count++;
-    
-    if (mbox->consumers != NULL)
-         wakeupConsumer(mbox);
-    
+
+    if (mbox->consumers != NULL) {
+        //printf("MboxSend: waking up consumer %d\n", mbox->consumers->pid);
+        wakeupConsumer(mbox, mbox_id);
+    }
+
     return 0;
 }
 
-/* MboxRecv: Receives a message from the mailbox.
- * For a zero-slot mailbox, all receivers block until the mailbox is released.
- */
-int MboxRecv(int mbox_id, void *msg_ptr, int msg_max_size) {
+int MboxCondRecv(int mbox_id, void *msg_ptr, int msg_max_size) {
     if (mbox_id < 0 || mbox_id >= MAXMBOX || !mailboxes[mbox_id].isActive)
-         return -1;
+        return -1;
     if (msg_max_size < 0)
-         return -1;
-    
+        return -1;
+
     Mbox *mbox = &mailboxes[mbox_id];
-    
-    /* For a zero-slot mailbox, all receivers must block. */
-    if (mbox->numSlots == 0) {
-         int pid = getpid();
-         if (numBlockedConsumers[mbox_id] < MAX_BLOCKED_CONSUMERS) {
-              blockedConsumers[mbox_id][numBlockedConsumers[mbox_id]++] = pid;
-         } else {
-              USLOSS_Console("MboxRecv: too many blocked consumers for mailbox %d\n", mbox_id);
-              return -1;
-         }
-         blockMe();  // Process blocks here.
-         if (!mbox->isActive)
-             return -1;
-         return 0;
-    }
-    
-    /* For normal (non-zero-slot) mailboxes: */
     SlotQueue *sq = &mailboxSlotQueues[mbox_id];
+
+    //printf("MboxRecv: started\n");
     if (sq->count == 0) {
-         mbox->consumers = &shadowProcesses[getpid() % MAXPROC];
-         mbox->consumers->pid = getpid();
-         blockMe();
-         if (!mbox->isActive)
-             return -1;
-         mbox->consumers = NULL;
+        //int pid = getpid();
+        // Add this process to the blocked consumers array
+        //if (numBlockedConsumers[mbox_id] < MAX_BLOCKED_CONSUMERS) {
+        //    blockedConsumers[mbox_id][numBlockedConsumers[mbox_id]++] = pid;
+        //}
+        //mbox->consumers = &shadowProcesses[pid % MAXPROC];
+        //mbox->consumers->pid = pid;
+        //printf("MboxRecv: blocking\n");
+        return -2;
+        //if (!mbox->isActive)
+            //return -1;
+        //mbox->consumers = NULL;
     }
-    
+
+    if (sq->count == 0) {
+        // If we got here and there's still no message, the mailbox was released
+        return -1;
+    }
+
     int slotIndex = sq->queue[sq->head];
     sq->head = (sq->head + 1) % sq->capacity;
     sq->count--;
-    
+
     if (msg_max_size < mailSlots[slotIndex].messageLength)
-         return -1;
-    
+        return -1;
+
     memcpy(msg_ptr, mailSlots[slotIndex].message, mailSlots[slotIndex].messageLength);
     int ret = mailSlots[slotIndex].messageLength;
-    
+
     mailSlots[slotIndex].inUse = 0;
     freeSlotQueue[freeSlotCount++] = slotIndex;
-    
+
+    //printf("MboxRecv: waking up producer\n");
     wakeupProducer(mbox, mbox_id);
-    
+
     return ret;
 }
 
-/* MboxCondRecv: Non-blocking receive.
- * If no message is available, return -2 immediately.
- */
-int MboxCondRecv(int mbox_id, void *msg_ptr, int msg_size) {
-    if (mbox_id < 0 || mbox_id >= MAXMBOX || !mailboxes[mbox_id].isActive)
-         return -1;
-    if (msg_size < 0)
-         return -1;
-    
-    SlotQueue *sq = &mailboxSlotQueues[mbox_id];
-    if (sq->count == 0)
-         return -2;
-    
-    int slotIndex = sq->queue[sq->head];
-    sq->head = (sq->head + 1) % sq->capacity;
-    sq->count--;
-    
-    if (msg_size < mailSlots[slotIndex].messageLength)
-         return -1;
-    
-    memcpy(msg_ptr, mailSlots[slotIndex].message, mailSlots[slotIndex].messageLength);
-    int ret = mailSlots[slotIndex].messageLength;
-    
-    mailSlots[slotIndex].inUse = 0;
-    freeSlotQueue[freeSlotCount++] = slotIndex;
-    
-    wakeupProducer(&mailboxes[mbox_id], mbox_id);
-    
-    return ret;
-}
-
-/* MboxCondSend: Non-blocking send.
- * If sending would block (mailbox full or no free slots), return -2 immediately.
- */
-int MboxCondSend(int mbox_id, void *msg_ptr, int msg_size) {
-    if (mbox_id < 0 || mbox_id >= MAXMBOX || !mailboxes[mbox_id].isActive)
-         return -1;
-    if (msg_size < 0 || msg_size > mailboxes[mbox_id].slotSize)
-         return -1;
-    if (msg_size > 0 && msg_ptr == NULL)
-         return -1;
-    
-    Mbox *mbox = &mailboxes[mbox_id];
-    SlotQueue *sq = &mailboxSlotQueues[mbox_id];
-    
-    if (sq->count >= mailboxes[mbox_id].numSlots)
-         return -2;
-    if (freeSlotCount == 0)
-         return -2;
-    
-    int slotIndex = freeSlotQueue[--freeSlotCount];
-    mailSlots[slotIndex].inUse = 1;
-    mailSlots[slotIndex].mailboxID = mbox_id;
-    mailSlots[slotIndex].messageLength = msg_size;
-    memcpy(mailSlots[slotIndex].message, msg_ptr, msg_size);
-    
-    sq->queue[sq->tail] = slotIndex;
-    sq->tail = (sq->tail + 1) % sq->capacity;
-    sq->count++;
-    
-    if (mbox->consumers != NULL)
-         wakeupConsumer(mbox);
-    
-    return 0;
-}
 
 void waitDevice(int type, int unit, int *status) {
     if (type == USLOSS_CLOCK_DEV && unit == 0) {
          MboxRecv(clockMailbox, status, sizeof(int));
     } else if (type == USLOSS_TERM_DEV && unit == 1) {
          terminalStatus = 0x6101;
-         *status = terminalStatus;     
+         *status = terminalStatus;
     } else {
          *status = -1;
     }
 }
 
-void phase2_start_service_processes(void) {
+void wakeupByDevice(int type, int unit, int status) {
 }
 
-void wakeupByDevice(int type, int unit, int status) {
+void phase2_start_service_processes(void) {
 }
