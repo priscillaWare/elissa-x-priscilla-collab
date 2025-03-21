@@ -33,6 +33,7 @@
  typedef struct Process {
      int pid;
      int blockedOn;         // Mailbox ID that the process is blocked on (-1 if not blocked)
+     int priority;
      struct Process *next;  // Next process in the queue
  } Process;
  
@@ -45,8 +46,8 @@
      int count;       // Number of indices currently stored.
  } SlotQueue;
  
- // Declare the global array for mailbox slot queues.
- extern SlotQueue mailboxSlotQueues[MAXMBOX];
+// Declare the global array for mailbox slot queues.
+extern SlotQueue mailboxSlotQueues[MAXMBOX];
  
  #endif
  
