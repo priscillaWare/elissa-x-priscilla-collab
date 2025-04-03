@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
 int sems[MAXSEMS];
 int mbox_lock_id;
 int queued;
@@ -104,6 +103,11 @@ void sys_semv(USLOSS_Sysargs *args) {
       }
 }
 
+void sys_gettime(USLOSS_Sysargs *args) {
+    args->arg1 = currentTime();
+
+}
+
 void sys_getpid(USLOSS_Sysargs *args) {
   args->arg1 = getpid();
 }
@@ -121,6 +125,7 @@ void phase3_init(void){
     systemCallVec[16] = sys_semcreate;
     systemCallVec[17] = sys_semp;
     systemCallVec[18] = sys_semv;
+    systemCallVec[20] = sys_gettime;
     systemCallVec[22] = sys_getpid;
   }
 
@@ -135,11 +140,6 @@ int kernSemCreate(int value, int *semaphore) {
 
 
 int kernSemP(int semaphore) {
-  return 0;
-  }
-
-
-int kernSemV(int semaphore){
   return 0;
   }
 
