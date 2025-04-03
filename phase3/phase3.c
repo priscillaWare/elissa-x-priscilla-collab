@@ -15,20 +15,22 @@ void sys_terminate(USLOSS_Sysargs *args) {
     quit(outstatus);
 }
 
-void trampoline(){
-  int result = USLOSS_PsrSet(current | USLOSS_PSR_CURRENT_INT);
+void trampoline(void *arg){
+  //int current = USLOSS_PsrGet();
+  int result = USLOSS_PsrSet(USLOSS_PSR_CURRENT_INT);
      if (result != USLOSS_DEV_OK) {
          USLOSS_Halt(1);
      }
-     
+
+    int (*original_func)(void*) = (int (*)(void*))arg; // Cast 'arg' back to the original function pointer
+    original_func(arg);  // Call the original function
+    Terminate(0);
   }
 
 void sys_spawn(USLOSS_Sysargs *args) {
     int stacksize = (int)(long)args->arg3;
     int priority = (int)(long)args->arg4;
-    printf("calling spork\n");
-    int retval = spork((char *)args->arg5, (int (*)(void*))args->arg1, args->arg2, stacksize, priority);
-    printf("spork returned %d\n", retval);
+    int retval = spork((char *)args->arg5, (int (*)(void*))trampoline, args->arg1, stacksize, priority);
 
     args->arg1 = retval;
     args->arg4 = 0;
@@ -38,8 +40,7 @@ void sys_wait(USLOSS_Sysargs *args) {
     int dummy = 0;
     int *status = &dummy;
     int retval = join(status);
-    printf("result = %d\n", retval);
-    args->arg2 = status;
+    args->arg2 = *status;
     args->arg1 = retval;
     if (retval == -2) {
       args->arg4 = -2;
