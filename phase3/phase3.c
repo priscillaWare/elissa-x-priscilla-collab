@@ -8,6 +8,12 @@ int mbox_lock_id;
 int queued;
 
 
+int sems[MAXSEMS];
+int mbox_lock_id;
+int queued;
+void *argument;
+
+
 void sys_terminate(USLOSS_Sysargs *args) {
     int dummy = 0;
     int *status = &dummy;
@@ -25,16 +31,17 @@ void trampoline(void *arg){
      if (result != USLOSS_DEV_OK) {
          USLOSS_Halt(1);
      }
-
-    int (*original_func)(void*) = (int (*)(void*))arg; // Cast 'arg' back to the original function pointer
-    original_func(arg);  // Call the original function
+    int (*original_func)(void*) = (int (*)(void*))arg;
+    //void *func_arg = (void*)arg2;
+    original_func(argument);
     Terminate(0);
   }
 
 void sys_spawn(USLOSS_Sysargs *args) {
     int stacksize = (int)(long)args->arg3;
     int priority = (int)(long)args->arg4;
-    int retval = spork((char *)args->arg5, (int (*)(void*))trampoline, args->arg1, stacksize, priority);
+    argument = args->arg2;
+    int retval = spork(args->arg5, (int (*)(void*))trampoline, args->arg1, stacksize, priority);
 
     args->arg1 = retval;
     args->arg4 = 0;
@@ -89,6 +96,10 @@ void sys_semp(USLOSS_Sysargs *args) {
 }
 
 void sys_semv(USLOSS_Sysargs *args) {
+    if (queued > 0) {
+      queued--;
+      MboxRecv(mbox_lock_id, NULL, 0);
+      }
     int index = args->arg1;
     sems[index]++;
     if (index >= 0 && index < MAXSEMS) {
@@ -96,10 +107,6 @@ void sys_semv(USLOSS_Sysargs *args) {
     }
     else {
       args->arg4 = 0;
-      }
-    if (queued > 0) {
-      queued--;
-      MboxRecv(mbox_lock_id, NULL, 0);
       }
 }
 
