@@ -24,5 +24,6 @@
 - kernSemV: executes the V() operation
 
 ## Known Issues
+Testcase 7: all of the children have the same priority, so the output of the children is random and may not exactly match
 Testcase 10: values do not match exactly, but are close to the expected output
 Testcase 20: order matches the alternate ouput specified in the testcase

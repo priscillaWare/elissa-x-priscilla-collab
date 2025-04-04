@@ -29,7 +29,7 @@ int LP_Child(void *);
  */
 int sem1, sem2;
 
-#define N (250*1000)
+#define N (25*10000)
 
 
 

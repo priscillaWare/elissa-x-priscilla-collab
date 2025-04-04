@@ -1,12 +1,14 @@
+#include "phase3typedef.h"
 #include "phase3.h"
+#include "phase2.h"
+#include "phase1.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-int sems[MAXSEMS];    // array of semaphores
-int mbox_lock_id;     // id of the mailbox used to block processes
-int queued;           // number of processes blocked by a mailbox
-
+Semaphore sems[MAXSEMS];  
+int mbox_lock_id;     
+int queued;          
 
 // sys_terminate: Terminates the current process, with the status specified. This function never
 // returns. Calls join() over and over until it returns -2, then calls quit.
@@ -17,7 +19,7 @@ void sys_terminate(USLOSS_Sysargs *args) {
     while (retval != -2 && retval != -3) {
         retval = join(status);
     }
-    int outstatus = args->arg1;
+    int outstatus = (int)(long)args->arg1;
     quit(outstatus);
 }
 
@@ -36,9 +38,8 @@ void trampoline(void *arg) {
 
     int ret = original_func(func_arg);
 
-    // Clean up and terminate
-    free(wrapper);  // Free the wrapper we allocated
-    Terminate(ret);  // Pass the return value to Terminate
+    free(wrapper);  
+    Terminate(ret);  
 }
 
 
@@ -76,62 +77,79 @@ void sys_wait(USLOSS_Sysargs *args) {
 // initializes value to store in the semaphore to args-arg1. returns -1 if the initial value is negative
 // or if no semaphores are available. Otherwise returns 0.
 void sys_semcreate(USLOSS_Sysargs *args) {
-   int index = -1;
-   for (int i = 0; i < MAXSEMS; i++) {
-     if (sems[i] == -1){
-       index = i;
-       break;
-     }
-   }
-   if (index == -1){
-     args->arg1 = 0;
-     args->arg4 = -1;
-     }
-   else {
-     sems[index] = args->arg1;
-     args->arg1 = index;
-     args->arg4 = 0;
-   }
+  int initial_value = (int)(long) args->arg1;
+
+  if (initial_value < 0) {
+      args->arg4 = -1;
+      return;
+  }
+
+  int index = -1;
+  for (int i = 0; i < MAXSEMS; i++) {
+      if (!sems[i].in_use) {
+          index = i;
+          break;
+      }
+  }
+
+  if (index == -1) {
+      args->arg4 = -1; 
+      return;
+  }
+
+  sems[index].value = initial_value;
+  sems[index].mboxID = MboxCreate(0, 0); 
+  sems[index].in_use = 1;
+
+  args->arg1 = (void*)(long)index;
+  args->arg4 = 0;
 }
+
 
 // sys_semp: executes the P() operation, which decrements the value of the semaphore by 1, unless
 // the value is 0 in which case the process blocks via zero slot mailbox.
 void sys_semp(USLOSS_Sysargs *args) {
-    int index = args->arg1;
-    if (sems[index] == 0) {
-      queued++;
-      MboxSend(mbox_lock_id, NULL, 0);
-    }
-    sems[index]--;
-    if (index >= 0 && index < MAXSEMS) {
-      args->arg4 = 0;
-    }
-    else {
-      args->arg4 = 0;
-      }
+  int index = (int)(long) args->arg1;
+
+  if (index < 0 || index >= MAXSEMS || !sems[index].in_use) {
+      args->arg4 = (void *)(long)-1;
+      return;
+  }
+
+  sems[index].value--;  
+
+  if (sems[index].value < 0) {
+      sems[index].blocked++;
+      MboxRecv(sems[index].mboxID, NULL, 0);  
+  }
+
+  args->arg4 = (void *)(long)0;
 }
+
 
 // sys_semv: executes the V() operation, which increments the value of the semaphore by 1, and
 // wakes up any process blocked on P() via zero slot mailbox.
 void sys_semv(USLOSS_Sysargs *args) {
-    int index = args->arg1;
-    sems[index]++;
-    if (index >= 0 && index < MAXSEMS) {
-      args->arg4 = 0;
-    }
-    else {
-      args->arg4 = 0;
-      }
-    if (queued > 0) {
-      queued--;
-      MboxRecv(mbox_lock_id, NULL, 0);
-      }
+  int index = (int)(long) args->arg1;
+
+  if (index < 0 || index >= MAXSEMS || !sems[index].in_use) {
+      args->arg4 = (void *)(long)-1;
+      return;
+  }
+
+  sems[index].value++; 
+
+  if (sems[index].value <= 0 && sems[index].blocked > 0) {
+      sems[index].blocked--;  
+      MboxSend(sems[index].mboxID, NULL, 0);  
+  }
+
+  args->arg4 = (void *)(long)0;
 }
 
 // sys_gettime: returns time of day via out pointer, arg1
 void sys_gettime(USLOSS_Sysargs *args) {
     args->arg1 = currentTime();
-
 }
 
 // sys_getpid: returns the pid via out pointer, arg1
@@ -140,9 +158,11 @@ void sys_getpid(USLOSS_Sysargs *args) {
 }
 
 void phase3_init(void){
-    for (int i = 0; i < MAXSEMS; i++) {
-      sems[i] = -1;
-    }
+  for (int i = 0; i < MAXSEMS; i++) {
+    sems[i].value = -1;
+    sems[i].mboxID = -1;
+    sems[i].in_use = 0;
+  }
     queued = 0;
     mbox_lock_id = MboxCreate(0,0);
 
@@ -166,46 +186,52 @@ void phase3_start_service_processes(void){
 // or if no semaphores are available. Must be called from kernel mode.
 int kernSemCreate(int value, int *semaphore) {
   int index = -1;
-   for (int i = 0; i < MAXSEMS; i++) {
-     if (sems[i] == -1){
-       index = i;
-       break;
-     }
-   }
-   if (index == -1){
-     return -1;
-     }
-   else {
-     sems[index] = value;
-     return index;
-   }
+  for (int i = 0; i < MAXSEMS; i++) {
+      if (!sems[i].in_use) {
+          index = i;
+          break;
+      }
   }
+
+  if (index == -1) {
+      return -1; // no free semaphores
+  }
+
+  sems[index].value = value;
+  sems[index].mboxID = MboxCreate(0, 0);
+  sems[index].in_use = 1;
+
+  *semaphore = index; // output the semaphore ID
+  return 0;
+}
+
 
 // kernSemP: executes the P() operation, which decrements the value of the semaphore by 1, unless
 // the value is 0 in which case the process blocks via zero slot mailbox. Must be called in kernel mode.
 int kernSemP(int semaphore) {
-    int index = semaphore;
-    if (sems[index] == 0) {
-      queued++;
-      MboxSend(mbox_lock_id, NULL, 0);
-    }
-    sems[index]--;
-    if (index >= 0 && index < MAXSEMS) {
+  if (semaphore < 0 || semaphore >= MAXSEMS || !sems[semaphore].in_use) {
       return -1;
-    }
-    else {
-      return 0;
-      }
   }
+
+  if (sems[semaphore].value == 0) {
+      MboxSend(sems[semaphore].mboxID, NULL, 0);
+  } else {
+      sems[semaphore].value--;
+  }
+
+  return 0;
+}
+
 
 // kernSemV: executes the V() operation, which increments the value of the semaphore by 1, and
 // wakes up any process blocked on P() via zero slot mailbox. Must be called in kernel mode.
-int kernSemV(int semaphore){
-    int index = semaphore;
-    sems[index]++;
-    if (queued > 0) {
-      queued--;
-      MboxRecv(mbox_lock_id, NULL, 0);
-      }
-      return 0;
+int kernSemV(int semaphore) {
+  if (semaphore < 0 || semaphore >= MAXSEMS || !sems[semaphore].in_use) {
+      return -1;
   }
+
+  sems[semaphore].value++;
+  MboxRecv(sems[semaphore].mboxID, NULL, 0); // wake one up
+
+  return 0;
+}

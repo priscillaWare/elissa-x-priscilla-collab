@@ -10,4 +10,12 @@ typedef struct {
     void *argument;          // argument to function
 } functionArgs;
 
+typedef struct {
+    int value;
+    int mboxID;
+    int in_use;
+    int blocked; // number of processes blocked in P
+} Semaphore;
+
+
 #endif //PHASE3TYPEDEF_H
