@@ -6,11 +6,6 @@
 int sems[MAXSEMS];
 int mbox_lock_id;
 int queued;
-
-
-int sems[MAXSEMS];
-int mbox_lock_id;
-int queued;
 void *argument;
 
 
@@ -25,26 +20,34 @@ void sys_terminate(USLOSS_Sysargs *args) {
     quit(outstatus);
 }
 
-void trampoline(void *arg){
-  //int current = USLOSS_PsrGet();
-  int result = USLOSS_PsrSet(USLOSS_PSR_CURRENT_INT);
-     if (result != USLOSS_DEV_OK) {
-         USLOSS_Halt(1);
-     }
-    int (*original_func)(void*) = (int (*)(void*))arg;
-    //void *func_arg = (void*)arg2;
-    original_func(argument);
-    Terminate(0);
-  }
+void trampoline(void *arg) {
+    int result = USLOSS_PsrSet(USLOSS_PSR_CURRENT_INT);
+    if (result != USLOSS_DEV_OK) {
+        USLOSS_Halt(1);
+    }
+
+    functionArgs *wrapper = (functionArgs*)arg;
+    int (*original_func)(void*) = wrapper->function;
+    void *func_arg = wrapper->argument;
+
+    int ret = original_func(func_arg);
+
+    // Clean up and terminate
+    free(wrapper);  // Free the wrapper we allocated
+    Terminate(ret);  // Pass the return value to Terminate
+}
 
 void sys_spawn(USLOSS_Sysargs *args) {
     int stacksize = (int)(long)args->arg3;
     int priority = (int)(long)args->arg4;
-    argument = args->arg2;
-    int retval = spork(args->arg5, (int (*)(void*))trampoline, args->arg1, stacksize, priority);
 
-    args->arg1 = retval;
-    args->arg4 = 0;
+    functionArgs *wrapper = (functionArgs*)malloc(sizeof(functionArgs));
+    wrapper->function = (int (*)(void*))(args->arg1);
+    wrapper->argument = args->arg2;
+    int retval = spork((char*)args->arg5, trampoline, wrapper, stacksize, priority);
+
+    args->arg1 = (void*)(long)retval;
+    args->arg4 = (void*)0;
 }
 
 void sys_wait(USLOSS_Sysargs *args) {
@@ -96,10 +99,6 @@ void sys_semp(USLOSS_Sysargs *args) {
 }
 
 void sys_semv(USLOSS_Sysargs *args) {
-    if (queued > 0) {
-      queued--;
-      MboxRecv(mbox_lock_id, NULL, 0);
-      }
     int index = args->arg1;
     sems[index]++;
     if (index >= 0 && index < MAXSEMS) {
@@ -107,6 +106,10 @@ void sys_semv(USLOSS_Sysargs *args) {
     }
     else {
       args->arg4 = 0;
+      }
+    if (queued > 0) {
+      queued--;
+      MboxRecv(mbox_lock_id, NULL, 0);
       }
 }
 
