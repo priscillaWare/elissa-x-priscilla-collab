@@ -74,8 +74,7 @@ void sys_wait(USLOSS_Sysargs *args) {
 
 // sys_semcreate: creates a new semaphore and returns the semaphore ID, for use in later function calls.
 // initializes value to store in the semaphore to args-arg1. returns -1 if the initial value is negative
-// or if no semaphores are available.
-Otherwise returns 0.
+// or if no semaphores are available. Otherwise returns 0.
 void sys_semcreate(USLOSS_Sysargs *args) {
    int index = -1;
    for (int i = 0; i < MAXSEMS; i++) {
@@ -174,51 +173,39 @@ int kernSemCreate(int value, int *semaphore) {
      }
    }
    if (index == -1){
-     args->arg1 = 0;
-     args->arg4 = -1;
+     return -1;
      }
    else {
-     sems[index] = args->arg1;
-     args->arg1 = index;
-     args->arg4 = 0;
+     sems[index] = value;
+     return index;
    }
   }
 
 // kernSemP: executes the P() operation, which decrements the value of the semaphore by 1, unless
 // the value is 0 in which case the process blocks via zero slot mailbox. Must be called in kernel mode.
 int kernSemP(int semaphore) {
-    int index = args->arg1;
+    int index = semaphore;
     if (sems[index] == 0) {
       queued++;
       MboxSend(mbox_lock_id, NULL, 0);
     }
     sems[index]--;
     if (index >= 0 && index < MAXSEMS) {
-      args->arg4 = 0;
+      return -1;
     }
     else {
-      args->arg4 = 0;
+      return 0;
       }
   }
 
 // kernSemV: executes the V() operation, which increments the value of the semaphore by 1, and
 // wakes up any process blocked on P() via zero slot mailbox. Must be called in kernel mode.
 int kernSemV(int semaphore){
-    int index = args->arg1;
+    int index = semaphore;
     sems[index]++;
-    if (index >= 0 && index < MAXSEMS) {
-      args->arg4 = 0;
-    }
-    else {
-      args->arg4 = 0;
-      }
     if (queued > 0) {
       queued--;
       MboxRecv(mbox_lock_id, NULL, 0);
       }
-  }
-
-
-int kernSemV(int semaphore){
-  return 0;
+      return 0;
   }
