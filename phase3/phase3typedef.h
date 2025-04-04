@@ -5,4 +5,9 @@
 #ifndef PHASE3TYPEDEF_H
 #define PHASE3TYPEDEF_H
 
+typedef struct {
+    int (*function)(void*);  // user function
+    void *argument;          // argument to function
+} functionArgs;
+
 #endif //PHASE3TYPEDEF_H
