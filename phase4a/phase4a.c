@@ -20,6 +20,18 @@
 #define USLOSS_DEV_CMD_WRITE 1
 #endif
 
+#define MAXLINE 80
+#define MAX_LINES_BUFFERED 10
+
+typedef struct {
+    char lines[MAX_LINES_BUFFERED][MAXLINE + 1];
+    int head, tail, count;
+    int mutexMbox;
+    int lineReadyMbox;
+} TermBuffer;
+
+TermBuffer termBuffers[MAX_TERMS];
+
 // Sleep request struct
 typedef struct {
     int pid;
@@ -32,6 +44,7 @@ static int  tickCount;
 
 // Forward declarations of syscall handlers and driver
 static int  ClockDriver(void *arg);
+static int TermDriver(void *arg);
 static void sys_sleep(USLOSS_Sysargs *args);
 static void sys_term_read(USLOSS_Sysargs *args);
 static void sys_term_write(USLOSS_Sysargs *args);
@@ -39,17 +52,52 @@ static void sys_term_write(USLOSS_Sysargs *args);
 // Syscall table registration (called in startup)
 extern void (*systemCallVec[])(USLOSS_Sysargs *);
 
-void phase4_init(void) {
-    systemCallVec[SYS_SLEEP]      = sys_sleep;
-    //systemCallVec[SYS_TERMREAD]   = sys_term_read;
-    //systemCallVec[SYS_TERMWRITE]  = sys_term_write;
-}
-
 // Spawn the single clock driver once startProcesses() has run
 void phase4_start_service_processes(void) {
     clockMbox = MboxCreate(100, sizeof(SleepReq));
     // in your initialization code, after creating clockMbox:
     spork("ClockDriver", ClockDriver, NULL, USLOSS_MIN_STACK, /* high priority */ 2);
+
+    for (int i = 0; i < MAX_TERMS; i++) {
+      char name[20];
+      sprintf(name, "TermDriver%d", i);
+      spork(name, TermDriver, NULL, USLOSS_MIN_STACK, 2);
+    }
+}
+
+static int TermDriver(void *arg) {
+    int unit = (int)(long)arg;
+    int status;
+    char currLine[MAXLINE + 1];
+    int currLen = 0;
+
+    while (1) {
+        waitDevice(USLOSS_TERM_DEV, unit, &status);
+
+        int recvChar = USLOSS_TERM_STAT_CHAR(status);  // extract char
+        int recvStatus = USLOSS_TERM_STAT_RECV(status); // see if it's valid
+
+        if (recvStatus == USLOSS_DEV_BUSY) {
+            // valid character received
+            currLine[currLen++] = recvChar;
+
+            if (recvChar == '\n' || currLen == MAXLINE) {
+                currLine[currLen] = '\0';
+
+                // enqueue into line buffer
+                if (MboxCondSend(termBuffers[unit].lineReadyMbox, currLine, strlen(currLine) + 1) < 0) {
+                    // Buffer full — discard oldest? Or just drop this one.
+                    // Currently just dropping the line.
+                }
+
+                currLen = 0;
+            }
+        }
+
+        // Optional: else if writing, update write status, etc.
+    }
+
+    return 0;  // never reached
 }
 
 // Clock driver: waits 100ms ticks, updates tickCount, unblocks sleepers
@@ -86,79 +134,63 @@ static void sys_sleep(USLOSS_Sysargs *args) {
     args->arg4 = (void*)(long)0;
 }
 
-//----------------------------------------
-// syscall handler: TermRead
-//----------------------------------------
-// static void sys_term_read(USLOSS_Sysargs *args) {
-//     char *buffer = (char *) args->arg1;
-//     int   bufSize = (int)(long) args->arg2;
-//     int   unit    = (int)(long) args->arg3;
-//     int   num;
+static void sys_term_read(USLOSS_Sysargs *args) {
+    char *userBuf = (char *) args->arg1;
+    int userBufSize = (int)(long) args->arg2;
+    int unit = (int)(long) args->arg3;
 
-//     int rc = TermReadKernel(buffer, bufSize, unit, &num);
+    if (unit < 0 || unit >= MAX_TERMS || userBuf == NULL || userBufSize <= 0) {
+        args->arg4 = (void*)(long)-1;
+        return;
+    }
 
-//     args->arg2 = (void*)(long) num;
-//     args->arg4 = (void*)(long) rc;
-// }
+    char line[MAXLINE + 1];
+    int rc = MboxRecv(termBuffers[unit].lineReadyMbox, &line, sizeof(line));
+    if (rc < 0) {
+        args->arg4 = (void*)(long)-1;
+        return;
+    }
 
-// //----------------------------------------
-// // syscall handler: TermWrite
-// //----------------------------------------
-// static void sys_term_write(USLOSS_Sysargs *args) {
-//     char *buf    = (char *) args->arg1;
-//     int   size   = (int)(long) args->arg2;
-//     int   unit   = (int)(long) args->arg3;
-//     int  *lenOut = (int *) args->arg4;
+    int len = strlen(line);
+    if (userBufSize < len) len = userBufSize;
 
-//     int rc = TermWriteKernel(buf, size, unit, lenOut);
+    memcpy(userBuf, line, len);
+    args->arg2 = (void*)(long)len;
+    args->arg4 = (void*)(long)0;
+}
 
-//     args->arg2 = (void*)(long) *lenOut;
-//     args->arg4 = (void*)(long) rc;
-// }
+static void sys_term_write(USLOSS_Sysargs *args) {
+    char *userBuf = (char *) args->arg1;
+    int userBufSize = (int)(long) args->arg2;
+    int unit = (int)(long) args->arg3;
 
-// //----------------------------------------
-// // Helpers for TermRead
-// //----------------------------------------
-// static int TermReadKernel(char *buffer, int bufSize, int unit, int *lenOut) {
-//     int status, count = 0;
-//     if (!buffer || bufSize <= 0 || unit < 0 || unit >= MAX_TERMS) {
-//         if (lenOut) *lenOut = 0;
-//         return -1;
-//     }
-//     while (count < bufSize) {
-//         waitDevice(USLOSS_TERM_DEV, unit, &status);
-//         if (status != USLOSS_DEV_OK) continue;
-//         char c = (char) USLOSS_TERM_STAT_CHAR(status);
-//         buffer[count++] = c;
-//         if (c == '\n') break;
-//     }
-//     if (lenOut) *lenOut = count;
-//     return 0;
-// }
-// static void sys_term_read(USLOSS_Sysargs *args);
+    if (unit < 0 || unit >= MAX_TERMS || userBuf == NULL || userBufSize <= 0) {
+        args->arg4 = (void*)(long)-1;
+        return;
+    }
 
-// //----------------------------------------
-// // Helpers for TermWrite
-// //----------------------------------------
-// static int TermWriteKernel(char *buffer, int bufSize, int unit, int *lenOut) {
-//     int status;
-//     if (!buffer || bufSize < 0 || unit < 0 || unit >= MAX_TERMS) {
-//         if (lenOut) *lenOut = 0;
-//         return -1;
-//     }
-//     for (int i = 0; i < bufSize; i++) {
-//         USLOSS_DeviceRequest devReq = {
-//             .opr  = USLOSS_DEV_CMD_WRITE,
-//             .reg1 = &buffer[i],
-//             .reg2 = NULL
-//         };
-//         USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, &devReq);
-//         waitDevice(USLOSS_TERM_DEV, unit, &status);
-//         if (status != USLOSS_DEV_OK) {
-//             if (lenOut) *lenOut = i;
-//             return status;
-//         }
-//     }
-//     if (lenOut) *lenOut = bufSize;
-//     return 0;
-// }
+    MboxSend(termBuffers[unit].mutexMbox, NULL, 0);
+
+    for (int i = 0; i < userBufSize; i++) {
+        int status;
+        int ch = userBuf[i];
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void *)(long)ch);
+        waitDevice(USLOSS_TERM_DEV, unit, &status);
+    }
+
+    MboxRecv(termBuffers[unit].mutexMbox, NULL, 0);
+    args->arg2 = (void*)(long)userBufSize;
+    args->arg4 = (void*)(long)0;
+}
+
+void phase4_init(void) {
+    systemCallVec[SYS_SLEEP] = sys_sleep;
+    systemCallVec[SYS_TERMREAD] = sys_term_read;
+    systemCallVec[SYS_TERMWRITE] = sys_term_write;
+
+    for (int i = 0; i < MAX_TERMS; i++) {
+        termBuffers[i].head = termBuffers[i].tail = termBuffers[i].count = 0;
+        termBuffers[i].mutexMbox = MboxCreate(1, 0);  // mutual exclusion
+        termBuffers[i].lineReadyMbox = MboxCreate(MAX_LINES_BUFFERED, sizeof(char[MAXLINE + 1]));
+    }
+}
