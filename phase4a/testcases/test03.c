@@ -49,8 +49,7 @@ int XXterm2(void *arg)
     len = 0;
     bzero(data, 256);
     USLOSS_Console("XXterm2(): reading a line from terminal 2\n");
-    result = TermRead(data, 80, 2, &len);  // temporarily test terminal 0
-
+    result = TermRead(data, 80, 2, &len);  // ask for 80 bytes
     if (result < 0)
         USLOSS_Console("XXterm2(): ERROR: TermRead returned %d\n", result);
 

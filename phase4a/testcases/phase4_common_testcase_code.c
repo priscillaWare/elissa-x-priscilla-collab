@@ -111,7 +111,6 @@ void phase5_mmu_pageTable_free(int pid, USLOSS_PTE *page_table)
 
 void phase5_start_service_processes()
 {
-    phase4_start_service_processes();
     USLOSS_Console("%s() called -- currently a NOP\n", __func__);
 }
 
