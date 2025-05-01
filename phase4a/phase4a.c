@@ -72,6 +72,7 @@ static void sys_disksize(USLOSS_Sysargs *args);
 static void sys_diskread(USLOSS_Sysargs *args);
 static void sys_diskwrite(USLOSS_Sysargs *args);
 static int  diskDriver(void *arg);
+static int dummyproc(char *arg);
 
 static void diskTrap(int dev, void *arg) {
     int unit   = (int)(long)arg;
@@ -106,7 +107,7 @@ void phase4_init(void) {
     // Initialize disk queue mailboxes
     diskLock = MboxCreate(1, sizeof(int));
     { int one = 1;  MboxSend(diskLock, &one, sizeof(one)); }
-    diskMail = MboxCreate(0, 0);
+    diskMail = MboxCreate(MAX_DISK_REQUESTS, 0);
 }
 
 void phase4_start_service_processes(void) {
@@ -119,9 +120,10 @@ void phase4_start_service_processes(void) {
         snprintf(name, sizeof(name), "termDriver%d", unit);
         spork(name, termDriver, (void *)(long)unit, USLOSS_MIN_STACK, 2);
     }
-
     // Disk driver
-    spork("diskDriver", diskDriver, NULL, USLOSS_MIN_STACK, 2);
+    
+    spork("clockDriver", clockDriver, NULL, USLOSS_MIN_STACK, 2);
+    spork("diskDriver1", diskDriver, NULL, USLOSS_MIN_STACK, 2);
 }
 
 // Don’t modify phase5_start_service_processes—keep it as the default NOP.
@@ -293,7 +295,7 @@ static void enqueue_disk_request(DiskRequest *req) {
         int idx = (dqHead + dqCount) % MAX_DISK_REQUESTS;
         diskQueue[idx] = *req;
         dqCount++;
-        MboxCondSend(diskMail, NULL, 0);
+        MboxSend(diskMail, NULL, 0);
     }
     MboxSend(diskLock, NULL, 0);
 }
@@ -439,4 +441,9 @@ static int diskDriver(void *arg) {
 
     // never reached
     return 0;
+}
+
+static int dummyproc(char *arg) {
+    Terminate(0);   // immediately exit
+    return 0;       // never reached
 }

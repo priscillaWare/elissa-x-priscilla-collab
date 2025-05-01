@@ -88,7 +88,6 @@ int ubiq(int t)
     }  
     else
         checkSum += t;
-    USLOSS_Console("ubiq: %d\n", t);
     return 0;
 
 }
