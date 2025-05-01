@@ -1,3 +1,4 @@
+
 // phase4a.c
 
 #include <usloss.h>
@@ -16,8 +17,6 @@
 #define MAX_SLEEPERS     100
 #define MAX_DISK_REQUESTS 100 
 #define MAXPROC  50
-static int diskDriverStarted = 0;   // have we sporked the driver yet?
-
 
 // --- Globals -------------------------------------------------------------
 
@@ -294,70 +293,72 @@ static void enqueue_disk_request(DiskRequest *req) {
         int idx = (dqHead + dqCount) % MAX_DISK_REQUESTS;
         diskQueue[idx] = *req;
         dqCount++;
+        MboxCondSend(diskMail, NULL, 0);
     }
     MboxSend(diskLock, NULL, 0);
-    MboxSend(diskMail, NULL, 0);
 }
 
-
 static void sys_diskread(USLOSS_Sysargs *args) {
-    if (!diskDriverStarted) {
-        spork("diskDriver", diskDriver, NULL, USLOSS_MIN_STACK, 3);
-        diskDriverStarted = 1;
-    }
-    //USLOSS_Console("starting to read: \n");
-    DiskRequest req = {
-        .unit       = (int)(long) args->arg2,    // disk unit (0 or 1)
-        .track      = (int)(long) args->arg3,    // starting track
-        .firstBlock = (int)(long) args->arg4,    // starting sector
-        .numBlocks  = (int)(long) args->arg5,    // number of sectors
-        .buffer     =        args->arg1,         // user buffer pointer
-        .isRead     =        1,                  // READ operation
-        .pid        =  getpid()                   // for unblockProc()
-    };
+    DiskRequest req;
 
-    enqueue_disk_request(&req);  // push onto diskQueue[]
-    blockMe();                   // sleep until diskDriver unblocks us
+    req.unit       = (int)(long) args->arg5;
+    req.track      = (int)(long) args->arg3;
+    req.firstBlock = (int)(long) args->arg4;
+    req.numBlocks  = (int)(long) args->arg2;
+    req.buffer     =  args->arg1;
+    req.isRead     =  1;
+    req.pid        =  getpid();
 
-    // Upon waking, return hardware status (always READY=0 here) and
-    // a syscall‐level success code of 0
-    args->arg1 = (void*)(long) USLOSS_DEV_READY;
-    args->arg4 = (void*)(long) 0;
+    enqueue_disk_request(&req);
+    blockMe();                         // wait until diskDriver calls unblockProc()
+    args->arg4 = (void*)(long)0;       // return code = 0
+    args->arg1 = (void*)(long)0;
 }
 
 static void sys_diskwrite(USLOSS_Sysargs *args) {
-    if (!diskDriverStarted) {
-        spork("diskDriver", diskDriver, NULL, USLOSS_MIN_STACK, 3);
-        diskDriverStarted = 1;
-    } 
-    DiskRequest req = {
-        .unit       = (int)(long) args->arg2,    // disk unit
-        .track      = (int)(long) args->arg3,    // starting track
-        .firstBlock = (int)(long) args->arg4,    // starting sector
-        .numBlocks  = (int)(long) args->arg5,    // number of sectors
-        .buffer     =        args->arg1,         // user buffer pointer
-        .isRead     =        0,                  // WRITE operation
-        .pid        =  getpid()
-    };
-
+    int unit       = (int)(long) args->arg5;
+    int track      = (int)(long) args->arg3;
+    int firstBlock = (int)(long) args->arg4;
+    int numBlocks  = (int)(long) args->arg2;
+    void *buffer   =  args->arg1;
+    
+    // 1) Reject invalid unit or start-sector immediately
+    if (unit < 0 || unit >= USLOSS_DISK_UNITS ||
+        firstBlock < 0 || firstBlock >= USLOSS_DISK_TRACK_SIZE ||
+            numBlocks <= 0) {
+        args->arg4 = (void*)(long)-1;
+        return;
+    }
+    
+    // 2) Build the request and clear its status slot
+    DiskRequest req = { unit, track, firstBlock, numBlocks, buffer, 0, getpid() };
+    diskStatus[req.pid] = 0;
+    
     enqueue_disk_request(&req);
-    blockMe();
-    args->arg1 = (void*)(long) USLOSS_DEV_READY;
-    args->arg4 = (void*)(long) 0;
+    blockMe();      // wakes once diskDriver calls unblockProc()
+    
+    // 3) Return code 0 (I/O was attempted), status = what the driver recorded
+    args->arg4 = (void*)(long)0;
+    args->arg1 = (void*)(long)diskStatus[req.pid];
 }
 
 //-----------------------------------------------------------------------------
 // diskDriver – service disk requests in C‐SCAN order, using USLOSS_DeviceRequest
 //-----------------------------------------------------------------------------
 static int diskDriver(void *arg) {
-    int currentTrack = 0, status;
+    int status;
+    int currentTrack = 0;
+    const int trackSize = USLOSS_DISK_TRACK_SIZE;  // sectors per track
+
     while (1) {
-        // wait for a request
+        // 1) Wait for a disk request to arrive
         MboxRecv(diskMail, NULL, 0);
         MboxRecv(diskLock, NULL, 0);
 
-        // C-SCAN to pick bestIdx …
-        int bestIdx = -1, bestTrack = INT_MAX;
+        // 2) Select request using C-SCAN scheduling
+        int bestIdx   = -1;
+        int bestTrack = INT_MAX;
+        // First look for the smallest track ≥ currentTrack
         for (int i = 0; i < dqCount; i++) {
             int idx   = (dqHead + i) % MAX_DISK_REQUESTS;
             int track = diskQueue[idx].track;
@@ -366,6 +367,7 @@ static int diskDriver(void *arg) {
                 bestIdx   = idx;
             }
         }
+        // If none found, wrap around and take the smallest track
         if (bestIdx < 0) {
             bestTrack = INT_MAX;
             for (int i = 0; i < dqCount; i++) {
@@ -378,9 +380,9 @@ static int diskDriver(void *arg) {
             }
         }
 
-        // dequeue
-        DiskRequest req = diskQueue[bestIdx];
-        for (int j = bestIdx; j < dqCount-1; j++) {
+        // 3) Dequeue the selected request
+        DiskRequest req = diskQueue[(dqHead + bestIdx) % MAX_DISK_REQUESTS];
+        for (int j = bestIdx; j < dqCount - 1; j++) {
             int src = (dqHead + j + 1) % MAX_DISK_REQUESTS;
             int dst = (dqHead + j)     % MAX_DISK_REQUESTS;
             diskQueue[dst] = diskQueue[src];
@@ -388,33 +390,53 @@ static int diskDriver(void *arg) {
         dqCount--;
         MboxSend(diskLock, NULL, 0);
 
-        // perform I/O (wrap-around per block)…
-        for (int blk = 0; blk < req.numBlocks; blk++) {
-            int logical     = req.firstBlock + blk;
-            int blockTrack  = req.track + (logical / USLOSS_DISK_TRACK_SIZE);
-            int blockNumber = logical % USLOSS_DISK_TRACK_SIZE;
+        // 4) Initialize this process’s status slot
+        diskStatus[req.pid] = USLOSS_DEV_OK;
+
+        // 5) For each block, compute its absolute track/sector, seek if needed, then R/W
+        int lastTrack = -1;
+        for (int i = 0; i < req.numBlocks && diskStatus[req.pid] == USLOSS_DEV_OK; i++) {
+            int absBlock = req.firstBlock + i;
+            int track    = req.track + absBlock / trackSize;
+            int sector   = absBlock % trackSize;
+
+            // SEEK if crossing into a new track
+            if (track != lastTrack) {
+                USLOSS_DeviceRequest dr;
+                dr.opr  = USLOSS_DISK_SEEK;
+                dr.reg1 = (void*)(long)track;
+                dr.reg2 = NULL;
+                USLOSS_DeviceOutput(USLOSS_DISK_DEV, req.unit, &dr);
+                waitDevice(USLOSS_DISK_DEV, req.unit, &status);
+                if (status != USLOSS_DEV_OK) {
+                    diskStatus[req.pid] = USLOSS_DEV_ERROR;
+                    break;
+                }
+                lastTrack = track;
+            }
+
+            // READ or WRITE the sector
             USLOSS_DeviceRequest dr;
-
-            // SEEK
-            dr.opr  = USLOSS_DISK_SEEK;
-            dr.reg1 = (void*)(long) blockTrack;
-            dr.reg2 = NULL;
+            dr.opr  = req.isRead ? USLOSS_DISK_READ : USLOSS_DISK_WRITE;
+            dr.reg1 = (void*)(long)sector;
+            dr.reg2 = (void*)((char*)req.buffer + i * USLOSS_DISK_SECTOR_SIZE);
             USLOSS_DeviceOutput(USLOSS_DISK_DEV, req.unit, &dr);
             waitDevice(USLOSS_DISK_DEV, req.unit, &status);
-
-            // READ or WRITE
-            dr.opr  = req.isRead ? USLOSS_DISK_READ
-                                 : USLOSS_DISK_WRITE;
-            dr.reg1 = (void*)(long) blockNumber;
-            dr.reg2 = (void*) ((char*)req.buffer
-                           + blk * USLOSS_DISK_SECTOR_SIZE);
-            USLOSS_DeviceOutput(USLOSS_DISK_DEV, req.unit, &dr);
-            waitDevice(USLOSS_DISK_DEV, req.unit, &status);
+            if (status != USLOSS_DEV_OK) {
+                diskStatus[req.pid] = USLOSS_DEV_ERROR;
+                break;
+            }
         }
 
-        // unblock the process
+        // 6) Wake the requesting process, it will check diskStatus[pid]
         unblockProc(req.pid);
-        currentTrack = req.track;
+
+        // 7) Update scan position
+        if (lastTrack >= 0) {
+            currentTrack = lastTrack;
+        }
     }
+
+    // never reached
     return 0;
 }

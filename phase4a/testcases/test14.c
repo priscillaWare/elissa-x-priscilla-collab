@@ -28,6 +28,7 @@ int k1(void *arg)
     ubiq(5);
     ubiq(0); 
     Terminate(2);
+    USLOSS_Console("Actually wait does she term?\n");
 }
 
 int k2(void *arg)
