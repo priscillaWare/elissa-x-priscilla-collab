@@ -51,14 +51,12 @@ static DiskRequest diskQueue[MAX_DISK_REQUESTS];
 static int         dqHead = 0, dqCount = 0;
 static int termReadMail[MAX_TERMINALS];
 static int termWriteLock[MAX_TERMINALS];
-static int termLock[MAX_TERMINALS];   // Lock to serialize both read/write per terminal
-// Tracks last written line (to ignore echoed characters in termDriver)
-static char lastWritten[MAX_TERMINALS][MAX_LINE_LEN+1];
-static int  echoIndex[MAX_TERMINALS]; // Index of next echo char expected
-static int termIOBusyLock[MAX_TERMINALS];
+static int blockedWriters[USLOSS_TERM_UNITS];
 static int diskLock;     // one‐slot mailbox as mutex
 static int diskMail; 
 static int diskStatus[MAXPROC];
+static int termXmitMail[MAX_TERMINALS];
+
 
 
 // --- Forward decls -------------------------------------------------------
@@ -93,15 +91,18 @@ void phase4_init(void) {
     systemCallVec[SYS_DISKWRITE] = sys_diskwrite;
 
     // Initialize terminal mailboxes and locks
-    for (int u = 0; u < MAX_TERMINALS; ++u) {
+    for (int u = 0; u < MAX_TERMINALS; u++) {
+        // existing init
         termBuf[u].head = termBuf[u].tail = termBuf[u].count = 0;
-        termReadMail[u] = MboxCreate(READ_QUEUE_SIZE, 0);
+        for (int i = 0; i < READ_QUEUE_SIZE; i++) {
+            termBuf[u].lines[i][0] = '\0';
+        }
+        termReadMail[u]  = MboxCreate(READ_QUEUE_SIZE, 0);
         termWriteLock[u] = MboxCreate(1, sizeof(int));
         { int one = 1; MboxSend(termWriteLock[u], &one, sizeof(one)); }
-        termLock[u] = MboxCreate(1, sizeof(int));
-        { int one = 1; MboxSend(termLock[u], &one, sizeof(one)); }
-        termIOBusyLock[u] = MboxCreate(1, sizeof(int));
-        { int one = 1; MboxSend(termIOBusyLock[u], &one, sizeof(one)); }
+
+        termXmitMail[u] = MboxCreate(1, 0);
+
     }
 
     // Initialize disk queue mailboxes
@@ -118,15 +119,21 @@ void phase4_start_service_processes(void) {
     for (int unit = 0; unit < MAX_TERMINALS; ++unit) {
         char name[16];
         snprintf(name, sizeof(name), "termDriver%d", unit);
-        spork(name, termDriver, (void *)(long)unit, USLOSS_MIN_STACK, 2);
+
+        // enable both RECV and XMIT interrupts and leave them on forever
+        int ctrl = 0;
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+        ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void*)(long)ctrl);
+
+        spork(name, termDriver, (void*)(long)unit, USLOSS_MIN_STACK, 2);
     }
+
     // Disk driver
-    
-    spork("clockDriver", clockDriver, NULL, USLOSS_MIN_STACK, 2);
     spork("diskDriver1", diskDriver, NULL, USLOSS_MIN_STACK, 2);
+    spork("clockDriverDummy", clockDriver, NULL, USLOSS_MIN_STACK, 2);
 }
 
-// Don’t modify phase5_start_service_processes—keep it as the default NOP.
 
 // --- Clock driver & Sleep syscall --------------------------------------
 
@@ -161,106 +168,150 @@ static void sys_sleep(USLOSS_Sysargs *args) {
     args->arg4 = (void *)0;
 }
 
-// --- Terminal read/write syscalls ---------------------------------------
+// -------------------------------------------------------
+// sys_termwrite
+//    – preserves RECV_INT on every output
+// -------------------------------------------------------
 static void sys_termwrite(USLOSS_Sysargs *args) {
-    int  unit = (int)(long)args->arg3;
-    char *buf  = (char*) args->arg1;
-    int   len  = (int)(long)args->arg2;
+    int    unit = (int)(long)args->arg3;
+    char  *buf  = (char*) args->arg1;
+    int    len  = (int)(long)args->arg2;
 
-    if (unit<0 || unit>=MAX_TERMINALS || len<0) {
+    if (unit < 0 || unit >= MAX_TERMINALS || len < 0) {
         args->arg4 = (void*)(long)-1;
         return;
     }
 
-    // serialize writers
+    // 1) Serialize writers
     int slot;
     MboxRecv(termWriteLock[unit], &slot, sizeof(slot));
-
-    // send each byte to the real terminal hardware
+    int ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+    // 2) For each byte: send to device, then wait on our xmit-mailbox
     for (int i = 0; i < len; i++) {
+        
         unsigned char ch = buf[i];
-        int ctrl = 0;
-        // preserve RECV interrupts!
-        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-        ctrl = USLOSS_TERM_CTRL_CHAR(ctrl, ch);
+        ctrl = 0;
+        ctrl = USLOSS_TERM_CTRL_CHAR(ctrl,      ch);
         ctrl = USLOSS_TERM_CTRL_XMIT_CHAR(ctrl);
         ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
-        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void*)(long)ctrl);
+        // leave RECV_INT on so driver still sees incoming chars
+        ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
 
-        int status;
-        waitDevice(USLOSS_TERM_DEV, unit, &status);
+        USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void*)(long)ctrl);
+        
+        blockedWriters[unit]++;  
+        MboxRecv(termXmitMail[unit], NULL, 0);  
+        blockedWriters[unit]--;
+
+        //USLOSS_Console("when do we start writin?\n");
     }
 
+    // 3) Release writer lock
     MboxSend(termWriteLock[unit], &slot, sizeof(slot));
+
+    // 4) Return success
     args->arg2 = (void*)(long)len;
     args->arg4 = (void*)0;
 }
 
 
-// --- sys_termread: dequeue a full line from termBuf ---
+// -------------------------------------------------------
+// sys_termread
+//    – dequeue exactly one full line
+//    – blocks on a blocking MboxRecv
+// -------------------------------------------------------
 static void sys_termread(USLOSS_Sysargs *args) {
-    int unit = (int)(long) args->arg3;
-    char *buf = (char*) args->arg1;
-    int  size = (int)(long) args->arg2 + 1;
+    int    unit = (int)(long) args->arg3;
+    char  *buf  = (char*) args->arg1;
+    int     max = (int)(long) args->arg2;
 
-    if (unit<0 || unit>=MAX_TERMINALS || size<=0) {
+    if (unit < 0 || unit >= MAX_TERMINALS || max <= 0) {
         args->arg4 = (void*)(long)-1;
         return;
     }
 
     TermBuf *tb = &termBuf[unit];
+
+    // wait until at least one full line is in the queue
     while (tb->count == 0) {
         MboxRecv(termReadMail[unit], NULL, 0);
     }
 
-    int idx = tb->head;
-    int len     = strlen(tb->lines[idx]);        // includes the '\n'
-    int maxCopy = size - 1;                      // reserve space for NUL
-    int n       = (len < maxCopy) ? len : maxCopy;
+    // copy out head line
+    int idx    = tb->head;
+    int length = strlen(tb->lines[idx]);
+    int n      = (length < max) ? length : max;
     memcpy(buf, tb->lines[idx], n);
-    buf[n] = '\0';                               // ensure C‐string
+    buf[n] = '\0';
 
     tb->head  = (tb->head + 1) % READ_QUEUE_SIZE;
     tb->count--;
 
-    args->arg2 = (void*)(long)n;                 // # of chars read, excl. NUL
+    args->arg2 = (void*)(long)n;
     args->arg4 = (void*)0;
 }
 
-
-// --- termDriver: capture real keyboard input into termBuf too ---
 static int termDriver(void *arg) {
-    int unit = (int)(long)arg, status;
-
-    // unmask both recv & xmit so writing works AND we get recv interrupts
-    int ctrl = 0;
-    ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
-    ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
-    USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void*)(long)ctrl);
+    int unit   = (int)(long) arg;
+    int status;
 
     while (1) {
-        waitDevice(USLOSS_TERM_DEV, unit, &status);
+        // 1) Wait for any terminal interrupt
+        waitDevice(USLOSS_TERM_INT, unit, &status);
 
-        if (USLOSS_TERM_STAT_RECV(status) == USLOSS_DEV_BUSY) {
-            char c = USLOSS_TERM_STAT_CHAR(status);
+        // 2) Ack & read the status register
+        USLOSS_DeviceInput(USLOSS_TERM_DEV, unit, &status);
+
+        // -- RECEIVE side: buffer input into lines[], flush on '\n', EOF, or full-line --
+        if (USLOSS_TERM_STAT_RECV(status) == USLOSS_DEV_READY) {
+            char    c  = USLOSS_TERM_STAT_CHAR(status);
             TermBuf *tb = &termBuf[unit];
-            int pos = strlen(tb->lines[tb->tail]);
-            if (pos < MAX_LINE_LEN) {
-                tb->lines[tb->tail][pos] = c;
+            int     pos = strlen(tb->lines[tb->tail]);
+
+            if (c != 0 && pos < MAX_LINE_LEN) {
+                tb->lines[tb->tail][pos]   = c;
                 tb->lines[tb->tail][pos+1] = '\0';
+                pos++;
             }
-            if (c == '\n' || pos+1 == MAX_LINE_LEN) {
+            if (c == '\n' || c == 0 || pos == MAX_LINE_LEN) {
                 if (tb->count < READ_QUEUE_SIZE) {
                     tb->count++;
+                } else {
+                    tb->head = (tb->head + 1) % READ_QUEUE_SIZE;
                 }
                 tb->tail = (tb->tail + 1) % READ_QUEUE_SIZE;
                 tb->lines[tb->tail][0] = '\0';
-                MboxCondSend(termReadMail[unit], NULL, 0);
+                MboxSend(termReadMail[unit], NULL, 0);
             }
         }
+
+        if (USLOSS_TERM_STAT_XMIT(status) == USLOSS_DEV_READY) {
+            // first, re-enable both receive and transmit interrupts
+            int ctrl = 0;
+            ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+            ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+            USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void*)(long)ctrl);
+        
+            // if a writer is actually blocked
+            if (blockedWriters[unit] > 0) {
+                MboxCondSend(termXmitMail[unit], NULL, 0);
+            }
+        } else {
+            // any other interrupt (receive), just re-arm interrupts
+            int ctrl = 0;
+            ctrl = USLOSS_TERM_CTRL_RECV_INT(ctrl);
+            ctrl = USLOSS_TERM_CTRL_XMIT_INT(ctrl);
+            USLOSS_DeviceOutput(USLOSS_TERM_DEV, unit, (void*)(long)ctrl);
+        }
+        
     }
-    return 0;  // never reached
+    // never reached
+    return 0;
 }
+
+
+
+
 // --- Disk syscalls & driver ---------------------------------------------
 //-----------------------------------------------------------------------------
 // sys_disksize -- syscall handler for DiskSize(unit, &sector, &track, &disk)
